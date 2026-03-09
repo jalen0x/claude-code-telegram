@@ -10,7 +10,6 @@ from src.config.settings import Settings
 from src.security.validators import SecurityValidator
 from src.storage.facade import Storage
 
-from .conversation_mode import ConversationEnhancer
 from .file_handler import FileHandler
 from .git_integration import GitIntegration
 from .image_handler import ImageHandler
@@ -89,14 +88,6 @@ class FeatureRegistry:
             except Exception as e:
                 logger.error("Failed to initialize voice handler", error=str(e))
 
-        # Conversation enhancements - skip in agentic mode
-        if not self.config.agentic_mode:
-            try:
-                self.features["conversation"] = ConversationEnhancer()
-                logger.info("Conversation enhancer feature enabled")
-            except Exception as e:
-                logger.error("Failed to initialize conversation enhancer", error=str(e))
-
         logger.info(
             "Feature initialization complete",
             enabled_features=list(self.features.keys()),
@@ -134,10 +125,6 @@ class FeatureRegistry:
         """Get voice handler feature"""
         return self.get_feature("voice_handler")
 
-    def get_conversation_enhancer(self) -> Optional[ConversationEnhancer]:
-        """Get conversation enhancer feature"""
-        return self.get_feature("conversation")
-
     def get_enabled_features(self) -> Dict[str, Any]:
         """Get all enabled features"""
         return self.features.copy()
@@ -145,11 +132,6 @@ class FeatureRegistry:
     def shutdown(self):
         """Shutdown all features"""
         logger.info("Shutting down features")
-
-        # Clear conversation contexts
-        conversation = self.get_conversation_enhancer()
-        if conversation:
-            conversation.conversation_contexts.clear()
 
         # Clear feature registry
         self.features.clear()

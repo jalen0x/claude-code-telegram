@@ -603,52 +603,6 @@ async def handle_text_message(
         # Update session info
         context.user_data["last_message"] = update.message.text
 
-        # Add conversation enhancements if available
-        features = context.bot_data.get("features")
-        conversation_enhancer = (
-            features.get_conversation_enhancer() if features else None
-        )
-
-        if conversation_enhancer and claude_response:
-            try:
-                # Update conversation context
-                conversation_context = conversation_enhancer.update_context(
-                    session_id=claude_response.session_id,
-                    user_id=user_id,
-                    working_directory=str(current_dir),
-                    tools_used=claude_response.tools_used or [],
-                    response_content=claude_response.content,
-                )
-
-                # Check if we should show follow-up suggestions
-                if conversation_enhancer.should_show_suggestions(
-                    claude_response.tools_used or [], claude_response.content
-                ):
-                    # Generate follow-up suggestions
-                    suggestions = conversation_enhancer.generate_follow_up_suggestions(
-                        claude_response.content,
-                        claude_response.tools_used or [],
-                        conversation_context,
-                    )
-
-                    if suggestions:
-                        # Create keyboard with suggestions
-                        suggestion_keyboard = (
-                            conversation_enhancer.create_follow_up_keyboard(suggestions)
-                        )
-
-                        # Send follow-up suggestions
-                        await update.message.reply_text(
-                            "💡 <b>What would you like to do next?</b>",
-                            parse_mode="HTML",
-                            reply_markup=suggestion_keyboard,
-                        )
-
-            except Exception as e:
-                logger.warning(
-                    "Conversation enhancement failed", error=str(e), user_id=user_id
-                )
-
         # Log successful message processing
         if audit_logger:
             await audit_logger.log_command(

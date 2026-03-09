@@ -31,7 +31,6 @@ def mock_settings():
     settings.enable_file_uploads = False
     settings.enable_session_export = False
     settings.enable_image_uploads = False
-    settings.enable_conversation_mode = False
     settings.enable_api_server = False
     settings.enable_scheduler = False
     settings.approved_directory = "/tmp/test"
