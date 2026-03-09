@@ -384,8 +384,10 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
-        # Determine permission mode
-        permission_mode = "plan" if context.user_data.get("plan_mode") else None
+        # Determine permission mode (general /mode setting, with plan_mode compat)
+        permission_mode = context.user_data.get("permission_mode") or (
+            "plan" if context.user_data.get("plan_mode") else None
+        )
 
         # Run Claude command
         success = True
@@ -448,7 +450,13 @@ async def handle_text_message(
         # Plan mode: show approval buttons only when Claude actually used tools
         # (i.e. has a real plan to execute). Pure text responses skip buttons.
         plan_keyboard = None
-        if permission_mode == "plan" and success and formatted_messages and claude_response and claude_response.tools_used:
+        if (
+            permission_mode == "plan"
+            and success
+            and formatted_messages
+            and claude_response
+            and claude_response.tools_used
+        ):
             context.user_data["pending_plan_prompt"] = message_text
             plan_keyboard = InlineKeyboardMarkup(
                 [

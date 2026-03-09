@@ -307,6 +307,7 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("plan", self.agentic_plan),
+            ("mode", self.agentic_mode),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
         ]
@@ -383,6 +384,7 @@ class MessageOrchestrator:
             ("git", command.git_command),
             ("restart", command.restart_command),
             ("plan", self.agentic_plan),
+            ("mode", self.agentic_mode),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -432,6 +434,7 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("plan", "Toggle plan mode (approve before execute)"),
+                BotCommand("mode", "Set permission mode (ask/auto/yolo/plan)"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("restart", "Restart the bot"),
             ]
@@ -455,6 +458,7 @@ class MessageOrchestrator:
                 BotCommand("git", "Git repository commands"),
                 BotCommand("restart", "Restart the bot"),
                 BotCommand("plan", "Toggle plan mode (approve before execute)"),
+                BotCommand("mode", "Set permission mode (ask/auto/yolo/plan)"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -550,8 +554,12 @@ class MessageOrchestrator:
             except Exception:
                 pass
 
+        mode_alias = self._get_current_mode_alias(context)
+        mode_label = self._MODE_INFO[mode_alias]["label"]
+
         await update.message.reply_text(
-            f"📂 {dir_display} · Session: {session_status}{cost_str}"
+            f"\U0001f4c2 {dir_display} \u00b7 Session: {session_status}"
+            f" \u00b7 Mode: {mode_label}{cost_str}"
         )
 
     def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -615,10 +623,12 @@ class MessageOrchestrator:
                 )
                 return
             context.user_data["plan_mode"] = plan_active
+            context.user_data["permission_mode"] = "plan" if plan_active else None
         else:
             # Toggle
             plan_active = not plan_active
             context.user_data["plan_mode"] = plan_active
+            context.user_data["permission_mode"] = "plan" if plan_active else None
 
         status = "ON" if plan_active else "OFF"
         description = (
@@ -644,6 +654,7 @@ class MessageOrchestrator:
             # Re-run the pending prompt with permission_mode=None (execute normally)
             pending = context.user_data.pop("pending_plan_prompt", None)
             context.user_data["plan_mode"] = False
+            context.user_data["permission_mode"] = None
             if not pending:
                 await query.edit_message_text("No pending plan to approve.")
                 return
@@ -694,6 +705,95 @@ class MessageOrchestrator:
             await query.edit_message_text(
                 "Plan rejected. Send a new message to try again."
             )
+
+    # Mode alias -> SDK permission_mode value
+    _MODE_MAP: Dict[str, str] = {
+        "ask": "default",
+        "auto": "acceptEdits",
+        "yolo": "bypassPermissions",
+        "plan": "plan",
+    }
+
+    # Display info per alias
+    _MODE_INFO: Dict[str, Dict[str, str]] = {
+        "ask": {
+            "label": "Ask",
+            "emoji": "\U0001f512",
+            "desc": "Claude will ask permission before each action.",
+        },
+        "auto": {
+            "label": "Auto",
+            "emoji": "\u2705",
+            "desc": "Claude will auto-approve file edits, ask for others.",
+        },
+        "yolo": {
+            "label": "YOLO",
+            "emoji": "\U0001f525",
+            "desc": "Claude will auto-approve everything.",
+        },
+        "plan": {
+            "label": "Plan",
+            "emoji": "\U0001f4cb",
+            "desc": "Claude will plan actions and ask for approval before executing.",
+        },
+    }
+
+    def _get_current_mode_alias(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        """Return the friendly alias for the current permission mode."""
+        pm = context.user_data.get("permission_mode")
+        if pm is None:
+            return "ask"
+        # Reverse lookup
+        for alias, sdk_val in self._MODE_MAP.items():
+            if sdk_val == pm:
+                return alias
+        return "ask"
+
+    async def agentic_mode(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show or set the Claude Code permission mode."""
+        args = update.message.text.split()[1:] if update.message.text else []
+
+        if not args:
+            # Show current mode
+            alias = self._get_current_mode_alias(context)
+            info = self._MODE_INFO[alias]
+            default_tag = " (default)" if alias == "ask" else ""
+            text = (
+                f"{info['emoji']} Current mode: <b>{info['label']}</b>{default_tag}\n"
+                f"{info['desc']}\n\n"
+                "Available modes:\n"
+                "\u2022 /mode ask \u2014 Ask before each action (default)\n"
+                "\u2022 /mode auto \u2014 Auto-approve file edits\n"
+                "\u2022 /mode yolo \u2014 Auto-approve everything\n"
+                "\u2022 /mode plan \u2014 Plan only, approve before execute"
+            )
+            await update.message.reply_text(text, parse_mode="HTML")
+            return
+
+        alias = args[0].lower()
+        if alias not in self._MODE_MAP:
+            await update.message.reply_text(
+                "Unknown mode. Use: /mode ask | auto | yolo | plan"
+            )
+            return
+
+        sdk_mode = self._MODE_MAP[alias]
+        info = self._MODE_INFO[alias]
+
+        # Store SDK permission mode (None means SDK default = "default")
+        context.user_data["permission_mode"] = sdk_mode
+
+        # Sync plan_mode flag for compatibility with /plan and Approve/Reject buttons
+        context.user_data["plan_mode"] = alias == "plan"
+
+        default_tag = " (default)" if alias == "ask" else ""
+        await update.message.reply_text(
+            f"{info['emoji']} Mode set to <b>{info['label']}</b>{default_tag}\n"
+            f"{info['desc']}",
+            parse_mode="HTML",
+        )
 
     def _format_verbose_progress(
         self,
@@ -1049,8 +1149,10 @@ class MessageOrchestrator:
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
 
-        # Determine permission mode
-        permission_mode = "plan" if context.user_data.get("plan_mode") else None
+        # Determine permission mode (general /mode setting, with plan_mode compat)
+        permission_mode = context.user_data.get("permission_mode") or (
+            "plan" if context.user_data.get("plan_mode") else None
+        )
 
         success = True
         try:
@@ -1124,7 +1226,13 @@ class MessageOrchestrator:
         # Plan mode: show approval buttons only when Claude actually used tools
         # (i.e. has a real plan to execute). Pure text responses skip buttons.
         plan_keyboard = None
-        if permission_mode == "plan" and success and formatted_messages and claude_response and claude_response.tools_used:
+        if (
+            permission_mode == "plan"
+            and success
+            and formatted_messages
+            and claude_response
+            and claude_response.tools_used
+        ):
             context.user_data["pending_plan_prompt"] = message_text
             plan_keyboard = InlineKeyboardMarkup(
                 [
