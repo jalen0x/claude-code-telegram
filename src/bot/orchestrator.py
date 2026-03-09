@@ -1223,15 +1223,18 @@ class MessageOrchestrator:
         except Exception:
             logger.debug("Failed to delete progress message, ignoring")
 
-        # Plan mode: show approval buttons only when Claude actually used tools
-        # (i.e. has a real plan to execute). Pure text responses skip buttons.
+        # Plan mode: show approval buttons only when Claude used write/mutating tools.
+        # Read-only tools (Read, Grep, Glob, LS) don't need approval.
+        _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "Bash", "Task", "NotebookEdit"}
         plan_keyboard = None
+        has_write_tools = claude_response and any(
+            t.get("name") in _WRITE_TOOLS for t in claude_response.tools_used
+        ) if claude_response else False
         if (
             permission_mode == "plan"
             and success
             and formatted_messages
-            and claude_response
-            and claude_response.tools_used
+            and has_write_tools
         ):
             context.user_data["pending_plan_prompt"] = message_text
             plan_keyboard = InlineKeyboardMarkup(
