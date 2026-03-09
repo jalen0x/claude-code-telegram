@@ -306,6 +306,7 @@ class MessageOrchestrator:
             ("new", self.agentic_new),
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
+            ("plan", self.agentic_plan),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
         ]
@@ -352,6 +353,14 @@ class MessageOrchestrator:
             )
         )
 
+        # Plan mode approval/rejection callbacks
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._plan_callback),
+                pattern=r"^plan:",
+            )
+        )
+
         logger.info("Agentic handlers registered")
 
     def _register_classic_handlers(self, app: Application) -> None:
@@ -373,6 +382,7 @@ class MessageOrchestrator:
             ("actions", command.quick_actions),
             ("git", command.git_command),
             ("restart", command.restart_command),
+            ("plan", self.agentic_plan),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -402,10 +412,16 @@ class MessageOrchestrator:
             group=10,
         )
         app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._plan_callback),
+                pattern=r"^plan:",
+            )
+        )
+        app.add_handler(
             CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
         )
 
-        logger.info("Classic handlers registered (13 commands + full handler set)")
+        logger.info("Classic handlers registered (15 commands + full handler set)")
 
     async def get_bot_commands(self) -> list:  # type: ignore[type-arg]
         """Return bot commands appropriate for current mode."""
@@ -415,6 +431,7 @@ class MessageOrchestrator:
                 BotCommand("new", "Start a fresh session"),
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
+                BotCommand("plan", "Toggle plan mode (approve before execute)"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("restart", "Restart the bot"),
             ]
@@ -437,6 +454,7 @@ class MessageOrchestrator:
                 BotCommand("actions", "Show quick actions"),
                 BotCommand("git", "Git repository commands"),
                 BotCommand("restart", "Restart the bot"),
+                BotCommand("plan", "Toggle plan mode (approve before execute)"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -577,6 +595,104 @@ class MessageOrchestrator:
             f"Verbosity set to <b>{level}</b> ({labels[level]})",
             parse_mode="HTML",
         )
+
+    async def agentic_plan(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Toggle plan mode on/off."""
+        plan_active = context.user_data.get("plan_mode", False)
+
+        if update.message.text and len(update.message.text.split()) > 1:
+            arg = update.message.text.split()[1].lower()
+            if arg in ("on", "1", "true"):
+                plan_active = True
+            elif arg in ("off", "0", "false"):
+                plan_active = False
+            else:
+                await update.message.reply_text(
+                    "Usage: /plan [on|off]\nCurrently: "
+                    + ("on" if plan_active else "off")
+                )
+                return
+            context.user_data["plan_mode"] = plan_active
+        else:
+            # Toggle
+            plan_active = not plan_active
+            context.user_data["plan_mode"] = plan_active
+
+        status = "ON" if plan_active else "OFF"
+        description = (
+            " — Claude will plan actions and ask for approval before executing."
+            if plan_active
+            else " — Claude will execute actions directly."
+        )
+        await update.message.reply_text(
+            f"Plan mode: <b>{status}</b>{description}", parse_mode="HTML"
+        )
+
+    async def _plan_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle plan approval/rejection callbacks."""
+        query = update.callback_query
+        await query.answer()
+
+        data = query.data  # "plan:approve" or "plan:reject"
+        action = data.split(":", 1)[1]
+
+        if action == "approve":
+            # Re-run the pending prompt with permission_mode=None (execute normally)
+            pending = context.user_data.pop("pending_plan_prompt", None)
+            if not pending:
+                await query.edit_message_text("No pending plan to approve.")
+                return
+
+            await query.edit_message_text("Approved! Executing plan...")
+
+            # Re-run through run_command with acceptEdits for execution
+            claude_integration = context.bot_data.get("claude_integration")
+            if not claude_integration:
+                await query.message.reply_text("Claude integration not available.")
+                return
+
+            current_dir = context.user_data.get(
+                "current_directory", self.settings.approved_directory
+            )
+            session_id = context.user_data.get("claude_session_id")
+
+            chat = query.message.chat
+            progress_msg = await chat.send_message("Executing approved plan...")
+            heartbeat = self._start_typing_heartbeat(chat)
+
+            try:
+                claude_response = await claude_integration.run_command(
+                    prompt=pending,
+                    working_directory=current_dir,
+                    user_id=query.from_user.id,
+                    session_id=session_id,
+                    permission_mode="acceptEdits",
+                )
+                context.user_data["claude_session_id"] = claude_response.session_id
+
+                from .utils.formatting import ResponseFormatter
+
+                formatter = ResponseFormatter(self.settings)
+                formatted = formatter.format_claude_response(claude_response.content)
+
+                await progress_msg.delete()
+                for msg in formatted:
+                    await chat.send_message(msg.text, parse_mode=msg.parse_mode)
+            except Exception as e:
+                logger.error("Plan execution failed", error=str(e))
+                await progress_msg.edit_text(f"Execution failed: {e}")
+            finally:
+                heartbeat.cancel()
+
+        elif action == "reject":
+            context.user_data.pop("pending_plan_prompt", None)
+            await query.edit_message_text(
+                "Plan rejected. Send a new message to try again."
+            )
 
     def _format_verbose_progress(
         self,
@@ -932,6 +1048,9 @@ class MessageOrchestrator:
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
 
+        # Determine permission mode
+        permission_mode = "plan" if context.user_data.get("plan_mode") else None
+
         success = True
         try:
             claude_response = await claude_integration.run_command(
@@ -941,6 +1060,7 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
+                permission_mode=permission_mode,
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1000,6 +1120,19 @@ class MessageOrchestrator:
         except Exception:
             logger.debug("Failed to delete progress message, ignoring")
 
+        # Plan mode: show approval buttons when plan response received
+        plan_keyboard = None
+        if permission_mode == "plan" and success and formatted_messages:
+            context.user_data["pending_plan_prompt"] = message_text
+            plan_keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Approve", callback_data="plan:approve"),
+                        InlineKeyboardButton("Reject", callback_data="plan:reject"),
+                    ]
+                ]
+            )
+
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: List[ImageAttachment] = mcp_images
 
@@ -1024,11 +1157,14 @@ class MessageOrchestrator:
             for i, message in enumerate(formatted_messages):
                 if not message.text or not message.text.strip():
                     continue
+                # Attach plan approval keyboard to the last message
+                is_last = i == len(formatted_messages) - 1
+                markup = plan_keyboard if is_last else None
                 try:
                     await update.message.reply_text(
                         message.text,
                         parse_mode=message.parse_mode,
-                        reply_markup=None,  # No keyboards in agentic mode
+                        reply_markup=markup,
                         reply_to_message_id=(
                             update.message.message_id if i == 0 else None
                         ),

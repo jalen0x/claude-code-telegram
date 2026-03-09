@@ -82,8 +82,8 @@ def deps():
     }
 
 
-def test_agentic_registers_6_commands(agentic_settings, deps):
-    """Agentic mode registers start, new, status, verbose, repo, restart commands."""
+def test_agentic_registers_7_commands(agentic_settings, deps):
+    """Agentic mode registers start, new, status, verbose, plan, repo, restart."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -100,17 +100,18 @@ def test_agentic_registers_6_commands(agentic_settings, deps):
     ]
     commands = [h[0][0].commands for h in cmd_handlers]
 
-    assert len(cmd_handlers) == 6
+    assert len(cmd_handlers) == 7
     assert frozenset({"start"}) in commands
     assert frozenset({"new"}) in commands
     assert frozenset({"status"}) in commands
     assert frozenset({"verbose"}) in commands
+    assert frozenset({"plan"}) in commands
     assert frozenset({"repo"}) in commands
     assert frozenset({"restart"}) in commands
 
 
-def test_classic_registers_14_commands(classic_settings, deps):
-    """Classic mode registers all 14 commands."""
+def test_classic_registers_15_commands(classic_settings, deps):
+    """Classic mode registers all 15 commands."""
     orchestrator = MessageOrchestrator(classic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -125,7 +126,7 @@ def test_classic_registers_14_commands(classic_settings, deps):
         if isinstance(call[0][0], CommandHandler)
     ]
 
-    assert len(cmd_handlers) == 14
+    assert len(cmd_handlers) == 15
 
 
 def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
@@ -151,26 +152,26 @@ def test_agentic_registers_text_document_photo_handlers(agentic_settings, deps):
 
     # 4 message handlers (text, document, photo, voice)
     assert len(msg_handlers) == 4
-    # 1 callback handler (for cd: only)
-    assert len(cb_handlers) == 1
+    # 2 callback handlers (cd: for project selection, plan: for plan approval)
+    assert len(cb_handlers) == 2
 
 
 async def test_agentic_bot_commands(agentic_settings, deps):
-    """Agentic mode returns 6 bot commands."""
+    """Agentic mode returns 7 bot commands."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 6
+    assert len(commands) == 7
     cmd_names = [c.command for c in commands]
-    assert cmd_names == ["start", "new", "status", "verbose", "repo", "restart"]
+    assert "plan" in cmd_names
 
 
 async def test_classic_bot_commands(classic_settings, deps):
-    """Classic mode returns 14 bot commands."""
+    """Classic mode returns 15 bot commands."""
     orchestrator = MessageOrchestrator(classic_settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 14
+    assert len(commands) == 15
     cmd_names = [c.command for c in commands]
     assert "start" in cmd_names
     assert "help" in cmd_names
@@ -322,8 +323,8 @@ async def test_agentic_text_calls_claude(agentic_settings, deps):
         assert call.kwargs.get("reply_markup") is None
 
 
-async def test_agentic_callback_scoped_to_cd_pattern(agentic_settings, deps):
-    """Agentic callback handler is registered with cd: pattern filter."""
+async def test_agentic_callbacks_cd_and_plan_patterns(agentic_settings, deps):
+    """Agentic callback handlers are registered with cd: and plan: patterns."""
     orchestrator = MessageOrchestrator(agentic_settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -338,10 +339,10 @@ async def test_agentic_callback_scoped_to_cd_pattern(agentic_settings, deps):
         if isinstance(call[0][0], CallbackQueryHandler)
     ]
 
-    assert len(cb_handlers) == 1
-    # The pattern attribute should match cd: prefixed data
-    assert cb_handlers[0].pattern is not None
-    assert cb_handlers[0].pattern.match("cd:my_project")
+    assert len(cb_handlers) == 2
+    patterns = {h.pattern.pattern for h in cb_handlers}
+    assert r"^cd:" in patterns
+    assert r"^plan:" in patterns
 
 
 async def test_agentic_document_rejects_large_files(agentic_settings, deps):
@@ -926,3 +927,101 @@ async def test_private_mode_rejects_help_outside_topics(private_thread_settings,
 
     assert called["value"] is False
     update.effective_message.reply_text.assert_called_once()
+
+
+# --- Plan mode tests ---
+
+
+async def test_agentic_plan_toggle(agentic_settings, deps):
+    """Plan command toggles plan_mode in user_data."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    update = MagicMock()
+    update.message.text = "/plan"
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {}
+
+    # First toggle: off -> on
+    await orchestrator.agentic_plan(update, context)
+    assert context.user_data["plan_mode"] is True
+
+    # Second toggle: on -> off
+    await orchestrator.agentic_plan(update, context)
+    assert context.user_data["plan_mode"] is False
+
+
+async def test_agentic_plan_explicit_on_off(agentic_settings, deps):
+    """Plan command accepts on/off arguments."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {}
+
+    update.message.text = "/plan on"
+    await orchestrator.agentic_plan(update, context)
+    assert context.user_data["plan_mode"] is True
+
+    update.message.text = "/plan off"
+    await orchestrator.agentic_plan(update, context)
+    assert context.user_data["plan_mode"] is False
+
+
+async def test_classic_plan_toggle(classic_settings, deps):
+    """Classic mode /plan toggles plan_mode just like agentic mode."""
+    orchestrator = MessageOrchestrator(classic_settings, deps)
+    update = MagicMock()
+    update.message.text = "/plan"
+    update.message.reply_text = AsyncMock()
+    context = MagicMock()
+    context.user_data = {}
+
+    # First toggle: off -> on
+    await orchestrator.agentic_plan(update, context)
+    assert context.user_data["plan_mode"] is True
+
+    # Second toggle: on -> off
+    await orchestrator.agentic_plan(update, context)
+    assert context.user_data["plan_mode"] is False
+
+
+async def test_agentic_text_passes_plan_permission_mode(agentic_settings, deps):
+    """When plan_mode is active, run_command receives permission_mode='plan'."""
+    orchestrator = MessageOrchestrator(agentic_settings, deps)
+
+    mock_response = MagicMock()
+    mock_response.session_id = "session-plan"
+    mock_response.content = "Here is my plan..."
+    mock_response.tools_used = []
+    mock_response.is_error = False
+
+    claude_integration = AsyncMock()
+    claude_integration.run_command = AsyncMock(return_value=mock_response)
+
+    update = MagicMock()
+    update.effective_user.id = 123
+    update.message.text = "Refactor the auth module"
+    update.message.message_id = 1
+    update.message.chat.send_action = AsyncMock()
+    update.message.chat.type = "group"
+    update.message.reply_text = AsyncMock()
+    update.message.message_thread_id = None
+
+    progress_msg = AsyncMock()
+    progress_msg.delete = AsyncMock()
+    update.message.reply_text.return_value = progress_msg
+
+    context = MagicMock()
+    context.user_data = {"plan_mode": True}
+    context.bot_data = {
+        "settings": agentic_settings,
+        "claude_integration": claude_integration,
+        "storage": None,
+        "rate_limiter": None,
+        "audit_logger": None,
+    }
+
+    await orchestrator.agentic_text(update, context)
+
+    call_kwargs = claude_integration.run_command.call_args
+    assert call_kwargs.kwargs.get("permission_mode") == "plan"

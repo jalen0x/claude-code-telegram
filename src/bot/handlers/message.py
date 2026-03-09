@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional
 
 import structlog
-from telegram import InputMediaPhoto, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.ext import ContextTypes
 
 from ...claude.exceptions import (
@@ -384,7 +384,11 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
+        # Determine permission mode
+        permission_mode = "plan" if context.user_data.get("plan_mode") else None
+
         # Run Claude command
+        success = True
         try:
             claude_response = await claude_integration.run_command(
                 prompt=message_text,
@@ -393,6 +397,7 @@ async def handle_text_message(
                 session_id=session_id,
                 on_stream=stream_handler,
                 force_new=force_new,
+                permission_mode=permission_mode,
             )
 
             # New session created successfully — clear the one-shot flag
@@ -429,6 +434,7 @@ async def handle_text_message(
             )
 
         except Exception as e:
+            success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             from ..utils.formatting import FormattedMessage
 
@@ -438,6 +444,19 @@ async def handle_text_message(
 
         # Delete progress message
         await progress_msg.delete()
+
+        # Plan mode: show approval buttons when plan response received
+        plan_keyboard = None
+        if permission_mode == "plan" and success and formatted_messages:
+            context.user_data["pending_plan_prompt"] = message_text
+            plan_keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Approve", callback_data="plan:approve"),
+                        InlineKeyboardButton("Reject", callback_data="plan:reject"),
+                    ]
+                ]
+            )
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: list[ImageAttachment] = mcp_images
@@ -492,11 +511,14 @@ async def handle_text_message(
         if not caption_sent:
             # Send formatted responses (may be multiple messages)
             for i, message in enumerate(formatted_messages):
+                # Attach plan approval keyboard to the last message
+                is_last = i == len(formatted_messages) - 1
+                markup = plan_keyboard if is_last else message.reply_markup
                 try:
                     await update.message.reply_text(
                         message.text,
                         parse_mode=message.parse_mode,
-                        reply_markup=message.reply_markup,
+                        reply_markup=markup,
                         reply_to_message_id=(
                             update.message.message_id if i == 0 else None
                         ),

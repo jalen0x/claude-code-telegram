@@ -4,7 +4,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import structlog
 from claude_agent_sdk import (
@@ -153,6 +153,9 @@ class ClaudeSDKManager:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        permission_mode: Optional[
+            Literal["default", "acceptEdits", "plan", "bypassPermissions"]
+        ] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -210,6 +213,7 @@ class ClaudeSDKManager:
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
                 system_prompt=base_prompt,
+                permission_mode=permission_mode,
                 setting_sources=["project"],
                 stderr=_stderr_callback,
             )
