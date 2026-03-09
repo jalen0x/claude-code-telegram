@@ -643,6 +643,7 @@ class MessageOrchestrator:
         if action == "approve":
             # Re-run the pending prompt with permission_mode=None (execute normally)
             pending = context.user_data.pop("pending_plan_prompt", None)
+            context.user_data["plan_mode"] = False
             if not pending:
                 await query.edit_message_text("No pending plan to approve.")
                 return
