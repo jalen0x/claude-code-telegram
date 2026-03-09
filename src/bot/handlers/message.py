@@ -445,9 +445,10 @@ async def handle_text_message(
         # Delete progress message
         await progress_msg.delete()
 
-        # Plan mode: show approval buttons when plan response received
+        # Plan mode: show approval buttons only when Claude actually used tools
+        # (i.e. has a real plan to execute). Pure text responses skip buttons.
         plan_keyboard = None
-        if permission_mode == "plan" and success and formatted_messages:
+        if permission_mode == "plan" and success and formatted_messages and claude_response and claude_response.tools_used:
             context.user_data["pending_plan_prompt"] = message_text
             plan_keyboard = InlineKeyboardMarkup(
                 [
