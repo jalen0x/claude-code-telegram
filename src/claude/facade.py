@@ -10,7 +10,6 @@ import structlog
 
 from ..config.settings import Settings
 from .sdk_integration import ClaudeResponse, ClaudeSDKManager, StreamUpdate
-from .tool_approval import ToolApprovalManager
 from .session import SessionManager
 
 logger = structlog.get_logger()
@@ -39,7 +38,6 @@ class ClaudeIntegration:
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
         force_new: bool = False,
         plan_mode: bool = False,
-        approval_manager: Optional[ToolApprovalManager] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -89,7 +87,6 @@ class ClaudeIntegration:
                     continue_session=should_continue,
                     stream_callback=on_stream,
                     plan_mode=plan_mode,
-                    approval_manager=approval_manager,
                 )
             except Exception as resume_error:
                 # If resume failed (e.g., session expired/missing on Claude's side),
@@ -115,7 +112,6 @@ class ClaudeIntegration:
                         continue_session=False,
                         stream_callback=on_stream,
                         plan_mode=plan_mode,
-                        approval_manager=approval_manager,
                     )
                 else:
                     raise
@@ -160,7 +156,6 @@ class ClaudeIntegration:
         continue_session: bool = False,
         stream_callback: Optional[Callable] = None,
         plan_mode: bool = False,
-        approval_manager: Optional[ToolApprovalManager] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
         return await self.sdk_manager.execute_command(
@@ -170,7 +165,6 @@ class ClaudeIntegration:
             continue_session=continue_session,
             stream_callback=stream_callback,
             plan_mode=plan_mode,
-            approval_manager=approval_manager,
         )
 
     async def _find_resumable_session(

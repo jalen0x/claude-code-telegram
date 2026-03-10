@@ -37,7 +37,6 @@ from .exceptions import (
     ClaudeTimeoutError,
 )
 from .monitor import _is_claude_internal_path, check_bash_directory_boundary
-from .tool_approval import WRITE_TOOLS, ToolApprovalManager
 
 logger = structlog.get_logger()
 
@@ -70,7 +69,6 @@ def _make_can_use_tool_callback(
     security_validator: SecurityValidator,
     working_directory: Path,
     approved_directory: Path,
-    approval_manager: Optional["ToolApprovalManager"] = None,
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
@@ -123,13 +121,6 @@ def _make_can_use_tool_callback(
                         message=error or "Bash directory boundary violation"
                     )
 
-        # Interactive approval for write tools (plan-execute mode only).
-        if approval_manager is not None and tool_name in WRITE_TOOLS:
-            decision = await approval_manager.request_approval(tool_name, tool_input)
-            if decision == "allow":
-                return PermissionResultAllow()
-            return PermissionResultDeny(message="User denied this action")
-
         return PermissionResultAllow()
 
     return can_use_tool
@@ -168,7 +159,6 @@ class ClaudeSDKManager:
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
         plan_mode: bool = False,
-        approval_manager: Optional[ToolApprovalManager] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -246,7 +236,6 @@ class ClaudeSDKManager:
                     security_validator=self.security_validator,
                     working_directory=working_directory,
                     approved_directory=self.config.approved_directory,
-                    approval_manager=approval_manager,
                 )
 
             # Resume previous session if we have a session_id

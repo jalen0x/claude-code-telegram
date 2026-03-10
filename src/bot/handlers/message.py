@@ -31,30 +31,7 @@ logger = structlog.get_logger()
 
 async def _format_progress_update(update_obj) -> Optional[str]:
     """Format progress updates with enhanced context and visual indicators."""
-    if update_obj.type == "tool_result":
-        # Show tool completion status.
-        tool_name = (update_obj.metadata or {}).get("tool_name", "Tool")
-        error_msg = (update_obj.metadata or {}).get("error")
-        if error_msg:
-            return f"❌ <b>{tool_name} failed</b>\n\n<i>{error_msg}</i>"
-        execution_time = ""
-        time_ms = (update_obj.metadata or {}).get("execution_time_ms")
-        if time_ms:
-            execution_time = f" ({time_ms}ms)"
-        return f"✅ <b>{tool_name} done</b>{execution_time}"
-
-    elif update_obj.type == "progress":
-        return f"🔄 <b>{update_obj.content or 'Working…'}</b>"
-
-    elif update_obj.type == "error":
-        error_msg = (
-            (update_obj.metadata or {}).get("error")
-            or update_obj.content
-            or "Unknown error"
-        )
-        return f"❌ <b>Error</b>\n\n<i>{error_msg}</i>"
-
-    elif update_obj.type == "assistant" and update_obj.tool_calls:
+    if update_obj.type == "assistant" and update_obj.tool_calls:
         # Show each tool call with relevant detail (file path, command, etc.).
         lines = []
         for tc in update_obj.tool_calls:
@@ -82,13 +59,6 @@ async def _format_progress_update(update_obj) -> Optional[str]:
             else update_obj.content
         )
         return f"💬 <i>{escape_html(content_preview)}</i>"
-
-    elif update_obj.type == "system":
-        # System initialization or other system messages
-        if update_obj.metadata and update_obj.metadata.get("subtype") == "init":
-            tools_count = len(update_obj.metadata.get("tools", []))
-            model = update_obj.metadata.get("model", "Claude")
-            return f"🚀 <b>Starting {model}</b> with {tools_count} tools available"
 
     return None
 

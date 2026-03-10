@@ -20,7 +20,6 @@ from telegram.ext import (
 )
 
 from ..config.settings import Settings
-from ..claude.tool_approval import ToolApprovalManager
 
 logger = structlog.get_logger()
 
@@ -263,63 +262,6 @@ class MessageOrchestrator:
             parse_mode="HTML",
         )
 
-    async def _permission_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle perm:{request_id}:{decision} inline button presses."""
-        query = update.callback_query
-        if not query:
-            return
-        await query.answer()
-
-        parts = (query.data or "").split(":")
-        if len(parts) != 3:
-            return
-        _, request_id, decision = parts
-
-        assert context.user_data is not None
-        approval_manager: Optional[ToolApprovalManager] = context.user_data.get(
-            "_approval_manager"
-        )
-        if not approval_manager:
-            try:
-                await query.edit_message_text(
-                    "⚠️ No active approval session.", parse_mode="HTML"
-                )
-            except Exception:
-                pass
-            return
-
-        resolved = approval_manager.resolve(request_id, decision)
-        if not resolved:
-            try:
-                await query.edit_message_text(
-                    "⚠️ This approval request has already expired.",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
-            return
-
-        # Update the approval message to reflect the user's decision.
-        labels = {
-            "allow": "✅ Allowed",
-            "deny": "❌ Denied",
-            "allow_all": "✅ Allowed All (session)",
-        }
-        label = labels.get(decision, decision)
-        msg = query.message
-        original = (msg.text or "") if msg and hasattr(msg, "text") else ""
-        # Strip the timeout line and buttons; append decision stamp.
-        clean = original.rsplit("\n\n⏱", 1)[0]
-        try:
-            await query.edit_message_text(
-                f"{clean}\n\n{label}",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
     async def _plan_execute_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -457,15 +399,8 @@ class MessageOrchestrator:
         # /plan command
         app.add_handler(CommandHandler("plan", self._inject_deps(self._plan_command)))
 
-        # Permission and plan-execute callbacks must be registered BEFORE the
-        # catch-all CallbackQueryHandler so their patterns are matched first.
-        app.add_handler(
-            CallbackQueryHandler(
-                self._inject_deps(self._permission_callback),
-                pattern=r"^perm:",
-            ),
-            group=0,
-        )
+        # plan-execute callback must be registered BEFORE the
+        # catch-all CallbackQueryHandler so its pattern is matched first.
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._plan_execute_callback),
