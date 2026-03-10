@@ -99,12 +99,6 @@ class ToolApprovalManager:
                         callback_data=f"perm:{request_id}:deny",
                     ),
                 ],
-                [
-                    InlineKeyboardButton(
-                        "✅ Allow All (this session)",
-                        callback_data=f"perm:{request_id}:allow_all",
-                    ),
-                ],
             ]
         )
 

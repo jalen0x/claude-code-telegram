@@ -373,14 +373,6 @@ class MessageOrchestrator:
         )
         session_id: Optional[str] = context.user_data.get("claude_session_id")
 
-        # Create a fresh ToolApprovalManager for this execution.
-        approval_manager = ToolApprovalManager(
-            bot=context.bot,
-            chat_id=chat.id,
-            timeout=120.0,
-        )
-        context.user_data["_approval_manager"] = approval_manager
-
         progress_msg = await chat.send_message("⚙️ Executing plan…")
 
         from .handlers.message import _format_progress_update
@@ -394,6 +386,7 @@ class MessageOrchestrator:
             except Exception:
                 pass
 
+        formatted_messages = []
         try:
             response = await claude_integration.run_command(  # type: ignore[union-attr]
                 prompt=prompt,
@@ -401,7 +394,6 @@ class MessageOrchestrator:
                 user_id=user_id,
                 session_id=session_id,
                 on_stream=_stream,
-                approval_manager=approval_manager,
             )
             context.user_data["claude_session_id"] = response.session_id
 
@@ -418,9 +410,6 @@ class MessageOrchestrator:
                     parse_mode="HTML",
                 )
             ]
-        finally:
-            context.user_data.pop("_approval_manager", None)
-
         await progress_msg.delete()
 
         for fmsg in formatted_messages:
