@@ -69,11 +69,15 @@ def _make_can_use_tool_callback(
     security_validator: SecurityValidator,
     working_directory: Path,
     approved_directory: Path,
+    approval_manager: Optional[Any] = None,
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
     The callback validates file path boundaries and bash directory boundaries
     *before* the SDK executes the tool, providing preventive security enforcement.
+
+    When *approval_manager* is provided (a :class:`ToolApprovalManager` instance)
+    write tools also pause and send an interactive Telegram approval request.
     """
     _FILE_TOOLS = {"Write", "Edit", "Read", "create_file", "edit_file", "read_file"}
     _BASH_TOOLS = {"Bash", "bash", "shell"}
@@ -121,6 +125,16 @@ def _make_can_use_tool_callback(
                         message=error or "Bash directory boundary violation"
                     )
 
+        # Interactive approval: ask the user before write operations
+        if approval_manager is not None:
+            decision = await approval_manager.request_approval(tool_name, tool_input)
+            if decision == "deny":
+                logger.info(
+                    "can_use_tool denied by user",
+                    tool_name=tool_name,
+                )
+                return PermissionResultDeny(message="User denied this operation.")
+
         return PermissionResultAllow()
 
     return can_use_tool
@@ -156,6 +170,7 @@ class ClaudeSDKManager:
         permission_mode: Optional[
             Literal["default", "acceptEdits", "plan", "bypassPermissions"]
         ] = None,
+        approval_manager: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -232,6 +247,7 @@ class ClaudeSDKManager:
                     security_validator=self.security_validator,
                     working_directory=working_directory,
                     approved_directory=self.config.approved_directory,
+                    approval_manager=approval_manager,
                 )
 
             # Resume previous session if we have a session_id

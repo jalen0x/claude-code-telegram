@@ -451,9 +451,12 @@ async def handle_text_message(
         # Read-only tools (Read, Grep, Glob, LS) don't need approval.
         _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "Bash", "Task", "NotebookEdit"}
         plan_keyboard = None
-        has_write_tools = claude_response and any(
-            t.get("name") in _WRITE_TOOLS for t in claude_response.tools_used
-        ) if claude_response else False
+        has_write_tools = (
+            claude_response
+            and any(t.get("name") in _WRITE_TOOLS for t in claude_response.tools_used)
+            if claude_response
+            else False
+        )
         if (
             permission_mode == "plan"
             and success
@@ -984,18 +987,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 parse_mode="HTML",
             )
     else:
-        # Fall back to unsupported message
         await update.message.reply_text(
             "📸 <b>Photo Upload</b>\n\n"
-            "Photo processing is not yet supported.\n\n"
-            "<b>Currently supported:</b>\n"
-            "• Text files (.py, .js, .md, etc.)\n"
-            "• Configuration files\n"
-            "• Documentation files\n\n"
-            "<b>Coming soon:</b>\n"
-            "• Image analysis\n"
-            "• Screenshot processing\n"
-            "• Diagram interpretation",
+            "Image processing requires the image handler feature to be enabled.\n"
+            "Please contact your administrator.",
             parse_mode="HTML",
         )
 
@@ -1138,77 +1133,6 @@ def _estimate_file_processing_cost(file_size: int) -> float:
     size_cost = (file_size / 1024) * 0.0001
 
     return base_cost + size_cost
-
-
-async def _generate_placeholder_response(
-    message_text: str, context: ContextTypes.DEFAULT_TYPE
-) -> dict:
-    """Generate placeholder response until Claude integration is implemented."""
-    settings: Settings = context.bot_data["settings"]
-    current_dir = getattr(
-        context.user_data, "current_directory", settings.approved_directory
-    )
-    relative_path = current_dir.relative_to(settings.approved_directory)
-
-    # Analyze the message for intent
-    message_lower = message_text.lower()
-
-    if any(
-        word in message_lower for word in ["list", "show", "see", "directory", "files"]
-    ):
-        response_text = (
-            f"🤖 <b>Claude Code Response</b> <i>(Placeholder)</i>\n\n"
-            f"I understand you want to see files. Try using the /ls command to list files "
-            f"in your current directory (<code>{relative_path}/</code>).\n\n"
-            f"<b>Available commands:</b>\n"
-            f"• /ls - List files\n"
-            f"• /cd &lt;dir&gt; - Change directory\n"
-            f"• /projects - Show projects\n\n"
-            f"<i>Note: Full Claude Code integration will be available in the next phase.</i>"
-        )
-
-    elif any(word in message_lower for word in ["create", "generate", "make", "build"]):
-        response_text = (
-            f"🤖 <b>Claude Code Response</b> <i>(Placeholder)</i>\n\n"
-            f"I understand you want to create something! Once the Claude Code integration "
-            f"is complete, I'll be able to:\n\n"
-            f"• Generate code files\n"
-            f"• Create project structures\n"
-            f"• Write documentation\n"
-            f"• Build complete applications\n\n"
-            f"<b>Current directory:</b> <code>{relative_path}/</code>\n\n"
-            f"<i>Full functionality coming soon!</i>"
-        )
-
-    elif any(word in message_lower for word in ["help", "how", "what", "explain"]):
-        response_text = (
-            "🤖 <b>Claude Code Response</b> <i>(Placeholder)</i>\n\n"
-            "I'm here to help! Try using /help for available commands.\n\n"
-            "<b>What I can do now:</b>\n"
-            "• Navigate directories (/cd, /ls, /pwd)\n"
-            "• Show projects (/projects)\n"
-            "• Manage sessions (/new, /status)\n\n"
-            "<b>Coming soon:</b>\n"
-            "• Full Claude Code integration\n"
-            "• Code generation and editing\n"
-            "• File operations\n"
-            "• Advanced programming assistance"
-        )
-
-    else:
-        response_text = (
-            f"🤖 <b>Claude Code Response</b> <i>(Placeholder)</i>\n\n"
-            f"I received your message: \"{message_text[:100]}{'...' if len(message_text) > 100 else ''}\"\n\n"
-            f"<b>Current Status:</b>\n"
-            f"• Directory: <code>{relative_path}/</code>\n"
-            f"• Bot core: ✅ Active\n"
-            f"• Claude integration: 🔄 Coming soon\n\n"
-            f"Once Claude Code integration is complete, I'll be able to process your "
-            f"requests fully and help with coding tasks!\n\n"
-            f"For now, try the available commands like /ls, /cd, and /help."
-        )
-
-    return {"text": response_text, "parse_mode": "HTML"}
 
 
 def _update_working_directory_from_claude_response(

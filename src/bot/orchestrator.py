@@ -29,6 +29,7 @@ from telegram.ext import (
 )
 
 from ..claude.sdk_integration import StreamUpdate
+from ..claude.tool_approval import ToolApprovalManager
 from ..config.settings import Settings
 from ..projects import PrivateTopicsUnavailableError
 from .utils.draft_streamer import DraftStreamer, generate_draft_id
@@ -306,7 +307,6 @@ class MessageOrchestrator:
             ("new", self.agentic_new),
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
-            ("plan", self.agentic_plan),
             ("mode", self.agentic_mode),
             ("repo", self.agentic_repo),
             ("restart", command.restart_command),
@@ -354,11 +354,11 @@ class MessageOrchestrator:
             )
         )
 
-        # Plan mode approval/rejection callbacks
+        # Real-time tool approval callbacks
         app.add_handler(
             CallbackQueryHandler(
-                self._inject_deps(self._plan_callback),
-                pattern=r"^plan:",
+                self._inject_deps(self._permission_callback),
+                pattern=r"^tool_approval:",
             )
         )
 
@@ -370,20 +370,11 @@ class MessageOrchestrator:
 
         handlers = [
             ("start", command.start_command),
-            ("help", command.help_command),
             ("new", command.new_session),
-            ("continue", command.continue_session),
-            ("end", command.end_session),
-            ("ls", command.list_files),
-            ("cd", command.change_directory),
-            ("pwd", command.print_working_directory),
             ("projects", command.show_projects),
             ("status", command.session_status),
-            ("export", command.export_session),
-            ("actions", command.quick_actions),
             ("git", command.git_command),
             ("restart", command.restart_command),
-            ("plan", self.agentic_plan),
             ("mode", self.agentic_mode),
         ]
         if self.settings.enable_project_threads:
@@ -415,8 +406,8 @@ class MessageOrchestrator:
         )
         app.add_handler(
             CallbackQueryHandler(
-                self._inject_deps(self._plan_callback),
-                pattern=r"^plan:",
+                self._inject_deps(self._permission_callback),
+                pattern=r"^tool_approval:",
             )
         )
         app.add_handler(
@@ -433,7 +424,6 @@ class MessageOrchestrator:
                 BotCommand("new", "Start a fresh session"),
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
-                BotCommand("plan", "Toggle plan mode (approve before execute)"),
                 BotCommand("mode", "Set permission mode (ask/auto/yolo/plan)"),
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("restart", "Restart the bot"),
@@ -444,20 +434,11 @@ class MessageOrchestrator:
         else:
             commands = [
                 BotCommand("start", "Start bot and show help"),
-                BotCommand("help", "Show available commands"),
                 BotCommand("new", "Clear context and start fresh session"),
-                BotCommand("continue", "Explicitly continue last session"),
-                BotCommand("end", "End current session and clear context"),
-                BotCommand("ls", "List files in current directory"),
-                BotCommand("cd", "Change directory (resumes project session)"),
-                BotCommand("pwd", "Show current directory"),
                 BotCommand("projects", "Show all projects"),
                 BotCommand("status", "Show session status"),
-                BotCommand("export", "Export current session"),
-                BotCommand("actions", "Show quick actions"),
                 BotCommand("git", "Git repository commands"),
                 BotCommand("restart", "Restart the bot"),
-                BotCommand("plan", "Toggle plan mode (approve before execute)"),
                 BotCommand("mode", "Set permission mode (ask/auto/yolo/plan)"),
             ]
             if self.settings.enable_project_threads:
@@ -604,107 +585,50 @@ class MessageOrchestrator:
             parse_mode="HTML",
         )
 
-    async def agentic_plan(
+    async def _permission_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Toggle plan mode on/off."""
-        plan_active = context.user_data.get("plan_mode", False)
+        """Handle real-time tool approval callbacks (``tool_approval:`` pattern).
 
-        if update.message.text and len(update.message.text.split()) > 1:
-            arg = update.message.text.split()[1].lower()
-            if arg in ("on", "1", "true"):
-                plan_active = True
-            elif arg in ("off", "0", "false"):
-                plan_active = False
-            else:
-                await update.message.reply_text(
-                    "Usage: /plan [on|off]\nCurrently: "
-                    + ("on" if plan_active else "off")
-                )
-                return
-            context.user_data["plan_mode"] = plan_active
-            context.user_data["permission_mode"] = "plan" if plan_active else None
-        else:
-            # Toggle
-            plan_active = not plan_active
-            context.user_data["plan_mode"] = plan_active
-            context.user_data["permission_mode"] = "plan" if plan_active else None
-
-        status = "ON" if plan_active else "OFF"
-        description = (
-            " — Claude will plan actions and ask for approval before executing."
-            if plan_active
-            else " — Claude will execute actions directly."
-        )
-        await update.message.reply_text(
-            f"Plan mode: <b>{status}</b>{description}", parse_mode="HTML"
-        )
-
-    async def _plan_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle plan approval/rejection callbacks."""
+        Resolves a pending :class:`ToolApprovalManager` request so that the
+        blocked ``can_use_tool`` coroutine can resume with the user's decision.
+        """
         query = update.callback_query
         await query.answer()
 
-        data = query.data  # "plan:approve" or "plan:reject"
-        action = data.split(":", 1)[1]
+        # callback_data format: "tool_approval:{approval_id}:{decision}"
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("⚠️ Malformed approval callback.")
+            return
+        _, approval_id, decision = parts
 
-        if action == "approve":
-            # Re-run the pending prompt with permission_mode=None (execute normally)
-            pending = context.user_data.pop("pending_plan_prompt", None)
-            context.user_data["plan_mode"] = False
-            context.user_data["permission_mode"] = None
-            if not pending:
-                await query.edit_message_text("No pending plan to approve.")
-                return
-
-            await query.edit_message_text("Approved! Executing plan...")
-
-            # Re-run through run_command with acceptEdits for execution
-            claude_integration = context.bot_data.get("claude_integration")
-            if not claude_integration:
-                await query.message.reply_text("Claude integration not available.")
-                return
-
-            current_dir = context.user_data.get(
-                "current_directory", self.settings.approved_directory
-            )
-            session_id = context.user_data.get("claude_session_id")
-
-            chat = query.message.chat
-            progress_msg = await chat.send_message("Executing approved plan...")
-            heartbeat = self._start_typing_heartbeat(chat)
-
-            try:
-                claude_response = await claude_integration.run_command(
-                    prompt=pending,
-                    working_directory=current_dir,
-                    user_id=query.from_user.id,
-                    session_id=session_id,
-                    permission_mode="acceptEdits",
-                )
-                context.user_data["claude_session_id"] = claude_response.session_id
-
-                from .utils.formatting import ResponseFormatter
-
-                formatter = ResponseFormatter(self.settings)
-                formatted = formatter.format_claude_response(claude_response.content)
-
-                await progress_msg.delete()
-                for msg in formatted:
-                    await chat.send_message(msg.text, parse_mode=msg.parse_mode)
-            except Exception as e:
-                logger.error("Plan execution failed", error=str(e))
-                await progress_msg.edit_text(f"Execution failed: {e}")
-            finally:
-                heartbeat.cancel()
-
-        elif action == "reject":
-            context.user_data.pop("pending_plan_prompt", None)
+        manager: Optional[ToolApprovalManager] = context.user_data.get(
+            "_approval_manager"
+        )
+        if manager is None:
             await query.edit_message_text(
-                "Plan rejected. Send a new message to try again."
+                "⚠️ No active approval session — this request may have expired."
             )
+            return
+
+        manager.resolve(approval_id, decision)
+
+        _labels: Dict[str, str] = {
+            "allow": "✅ Allowed",
+            "deny": "❌ Denied",
+            "allow_all": "✅✅ Allowed All",
+        }
+        label = _labels.get(decision, decision)
+        original_text = query.message.text if query.message else ""
+        try:
+            await query.edit_message_text(
+                f"{original_text}\n\n→ {label}",
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
 
     # Mode alias -> SDK permission_mode value
     _MODE_MAP: Dict[str, str] = {
@@ -1154,6 +1078,16 @@ class MessageOrchestrator:
             "plan" if context.user_data.get("plan_mode") else None
         )
 
+        # Create an interactive approval manager for ask/plan modes so the user
+        # can allow or deny each write tool in real time.
+        approval_manager: Optional[ToolApprovalManager] = None
+        if permission_mode in (None, "default", "plan"):
+            approval_manager = ToolApprovalManager(
+                bot=context.bot,
+                chat_id=update.effective_chat.id,
+            )
+            context.user_data["_approval_manager"] = approval_manager
+
         success = True
         try:
             claude_response = await claude_integration.run_command(
@@ -1164,6 +1098,7 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
                 permission_mode=permission_mode,
+                approval_manager=approval_manager,
             )
 
             # New session created successfully — clear the one-shot flag
@@ -1217,34 +1152,14 @@ class MessageOrchestrator:
                     await draft_streamer.flush()
                 except Exception:
                     logger.debug("Draft flush failed in finally block", user_id=user_id)
+            if approval_manager is not None:
+                await approval_manager.cleanup()
+                context.user_data.pop("_approval_manager", None)
 
         try:
             await progress_msg.delete()
         except Exception:
             logger.debug("Failed to delete progress message, ignoring")
-
-        # Plan mode: show approval buttons only when Claude used write/mutating tools.
-        # Read-only tools (Read, Grep, Glob, LS) don't need approval.
-        _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "Bash", "Task", "NotebookEdit"}
-        plan_keyboard = None
-        has_write_tools = claude_response and any(
-            t.get("name") in _WRITE_TOOLS for t in claude_response.tools_used
-        ) if claude_response else False
-        if (
-            permission_mode == "plan"
-            and success
-            and formatted_messages
-            and has_write_tools
-        ):
-            context.user_data["pending_plan_prompt"] = message_text
-            plan_keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("Approve", callback_data="plan:approve"),
-                        InlineKeyboardButton("Reject", callback_data="plan:reject"),
-                    ]
-                ]
-            )
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: List[ImageAttachment] = mcp_images
@@ -1270,14 +1185,11 @@ class MessageOrchestrator:
             for i, message in enumerate(formatted_messages):
                 if not message.text or not message.text.strip():
                     continue
-                # Attach plan approval keyboard to the last message
-                is_last = i == len(formatted_messages) - 1
-                markup = plan_keyboard if is_last else None
                 try:
                     await update.message.reply_text(
                         message.text,
                         parse_mode=message.parse_mode,
-                        reply_markup=markup,
+                        reply_markup=None,
                         reply_to_message_id=(
                             update.message.message_id if i == 0 else None
                         ),

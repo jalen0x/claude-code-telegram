@@ -38,6 +38,7 @@ class ClaudeIntegration:
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
         force_new: bool = False,
         permission_mode: Optional[str] = None,
+        approval_manager: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Run Claude Code command with full integration."""
         logger.info(
@@ -87,6 +88,7 @@ class ClaudeIntegration:
                     continue_session=should_continue,
                     stream_callback=on_stream,
                     permission_mode=permission_mode,
+                    approval_manager=approval_manager,
                 )
             except Exception as resume_error:
                 # If resume failed (e.g., session expired/missing on Claude's side),
@@ -112,6 +114,7 @@ class ClaudeIntegration:
                         continue_session=False,
                         stream_callback=on_stream,
                         permission_mode=permission_mode,
+                        approval_manager=approval_manager,
                     )
                 else:
                     raise
@@ -156,6 +159,7 @@ class ClaudeIntegration:
         continue_session: bool = False,
         stream_callback: Optional[Callable] = None,
         permission_mode: Optional[str] = None,
+        approval_manager: Optional[Any] = None,
     ) -> ClaudeResponse:
         """Execute command via SDK."""
         return await self.sdk_manager.execute_command(
@@ -165,6 +169,7 @@ class ClaudeIntegration:
             continue_session=continue_session,
             stream_callback=stream_callback,
             permission_mode=permission_mode,
+            approval_manager=approval_manager,
         )
 
     async def _find_resumable_session(

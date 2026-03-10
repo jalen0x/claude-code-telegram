@@ -411,7 +411,7 @@ class ResponseFormatter:
     ) -> Optional[InlineKeyboardMarkup]:
         """Get context-aware quick action keyboard."""
         if not context:
-            return self._get_quick_actions_keyboard()
+            return None
 
         buttons = []
 
@@ -545,23 +545,6 @@ class ResponseFormatter:
             messages.append(FormattedMessage("\n".join(current_lines)))
 
         return messages
-
-    def _get_quick_actions_keyboard(self) -> InlineKeyboardMarkup:
-        """Get quick actions inline keyboard."""
-        keyboard = [
-            [
-                InlineKeyboardButton("🧪 Test", callback_data="quick:test"),
-                InlineKeyboardButton("📦 Install", callback_data="quick:install"),
-                InlineKeyboardButton("🎨 Format", callback_data="quick:format"),
-            ],
-            [
-                InlineKeyboardButton("🔍 Find TODOs", callback_data="quick:find_todos"),
-                InlineKeyboardButton("🔨 Build", callback_data="quick:build"),
-                InlineKeyboardButton("📊 Git Status", callback_data="quick:git_status"),
-            ],
-        ]
-
-        return InlineKeyboardMarkup(keyboard)
 
     def create_confirmation_keyboard(
         self, confirm_data: str, cancel_data: str = "confirm:no"

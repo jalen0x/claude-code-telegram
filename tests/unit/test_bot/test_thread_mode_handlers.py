@@ -34,34 +34,6 @@ def thread_settings(tmp_path: Path):
     return settings, project_root
 
 
-async def test_command_cd_stays_within_project_root(thread_settings):
-    """/cd .. at project root remains pinned to project root in thread mode."""
-    settings, project_root = thread_settings
-
-    update = MagicMock()
-    update.effective_user.id = 1
-    update.message.reply_text = AsyncMock()
-
-    context = MagicMock()
-    context.args = [".."]
-    context.bot_data = {
-        "settings": settings,
-        "security_validator": None,
-        "audit_logger": None,
-        "claude_integration": AsyncMock(
-            _find_resumable_session=AsyncMock(return_value=None)
-        ),
-    }
-    context.user_data = {
-        "current_directory": project_root,
-        "_thread_context": {"project_root": str(project_root)},
-    }
-
-    await command.change_directory(update, context)
-
-    assert context.user_data["current_directory"] == project_root
-
-
 async def test_callback_cd_stays_within_project_root(thread_settings):
     """cd callback keeps navigation constrained to thread project root."""
     settings, project_root = thread_settings
