@@ -15,7 +15,6 @@ from ...claude.exceptions import (
     ClaudeSessionError,
     ClaudeTimeoutError,
 )
-from ...claude.tool_approval import ToolApprovalManager
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
@@ -385,25 +384,6 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
-        # Determine permission mode (general /mode setting, with plan_mode compat)
-        permission_mode = context.user_data.get("permission_mode") or (
-            "plan" if context.user_data.get("plan_mode") else None
-        )
-
-        # Create interactive approval manager for ask mode.
-        # When approval_manager is set, we do NOT pass permission_mode to CLI
-        # because can_use_tool (with permission_prompt_tool_name="stdio") handles
-        # all permission decisions. Passing --permission-mode would make CLI
-        # handle permissions internally instead of delegating to our callback.
-        approval_manager = None
-        effective_permission_mode = permission_mode
-        if permission_mode in (None, "default", "plan"):
-            approval_manager = ToolApprovalManager(
-                bot=context.bot,
-                chat_id=update.effective_chat.id,
-            )
-            context.user_data["_approval_manager"] = approval_manager
-
         # Run Claude command
         try:
             claude_response = await claude_integration.run_command(
@@ -413,11 +393,6 @@ async def handle_text_message(
                 session_id=session_id,
                 on_stream=stream_handler,
                 force_new=force_new,
-                # When approval_manager handles permissions, don't pass
-                # permission_mode to CLI — it would bypass our can_use_tool callback.
-                # Only pass explicit modes like acceptEdits/bypassPermissions.
-                permission_mode=None if approval_manager else permission_mode,
-                approval_manager=approval_manager,
             )
 
             # New session created successfully — clear the one-shot flag
@@ -461,11 +436,6 @@ async def handle_text_message(
             formatted_messages = [
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")
             ]
-
-        # Clean up approval manager after execution
-        context.user_data.pop("_approval_manager", None)
-        if approval_manager:
-            await approval_manager.cleanup()
 
         # Delete progress message
         await progress_msg.delete()
@@ -625,11 +595,6 @@ async def handle_text_message(
         logger.info("Text message processed successfully", user_id=user_id)
 
     except Exception as e:
-        # Clean up approval manager on unexpected error
-        mgr = context.user_data.pop("_approval_manager", None)
-        if mgr:
-            await mgr.cleanup()
-
         # Clean up progress message if it exists
         try:
             await progress_msg.delete()

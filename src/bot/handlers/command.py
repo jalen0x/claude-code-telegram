@@ -91,8 +91,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"<b>Commands:</b>\n"
         f"• <code>/new</code> - Start a fresh session\n"
         f"• <code>/projects</code> - Show available projects\n"
-        f"• <code>/status</code> - Show session status\n"
-        f"• <code>/mode</code> - Set permission mode"
+        f"• <code>/status</code> - Show session status"
         f"{sync_section}"
     )
 

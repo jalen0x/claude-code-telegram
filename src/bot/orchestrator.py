@@ -19,7 +19,6 @@ from telegram.ext import (
     filters,
 )
 
-from ..claude.tool_approval import ToolApprovalManager
 from ..config.settings import Settings
 
 logger = structlog.get_logger()
@@ -261,7 +260,6 @@ class MessageOrchestrator:
             ("status", command.session_status),
             ("git", command.git_command),
             ("restart", command.restart_command),
-            ("mode", self.mode_command),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -291,12 +289,6 @@ class MessageOrchestrator:
             group=10,
         )
         app.add_handler(
-            CallbackQueryHandler(
-                self._inject_deps(self._permission_callback),
-                pattern=r"^tool_approval:",
-            )
-        )
-        app.add_handler(
             CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
         )
 
@@ -311,142 +303,7 @@ class MessageOrchestrator:
             BotCommand("status", "Show session status"),
             BotCommand("git", "Git repository commands"),
             BotCommand("restart", "Restart the bot"),
-            BotCommand("mode", "Set permission mode (ask/auto/yolo/plan)"),
         ]
         if self.settings.enable_project_threads:
             commands.append(BotCommand("sync_threads", "Sync project topics"))
         return commands
-
-    async def _permission_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle real-time tool approval callbacks (``tool_approval:`` pattern).
-
-        Resolves a pending :class:`ToolApprovalManager` request so that the
-        blocked ``can_use_tool`` coroutine can resume with the user's decision.
-        """
-        query = update.callback_query
-        await query.answer()
-
-        # callback_data format: "tool_approval:{approval_id}:{decision}"
-        parts = (query.data or "").split(":", 2)
-        if len(parts) != 3:
-            await query.edit_message_text("⚠️ Malformed approval callback.")
-            return
-        _, approval_id, decision = parts
-
-        manager: Optional[ToolApprovalManager] = context.user_data.get(
-            "_approval_manager"
-        )
-        if manager is None:
-            await query.edit_message_text(
-                "⚠️ No active approval session — this request may have expired."
-            )
-            return
-
-        manager.resolve(approval_id, decision)
-
-        _labels: Dict[str, str] = {
-            "allow": "✅ Allowed",
-            "deny": "❌ Denied",
-            "allow_all": "✅✅ Allowed All",
-        }
-        label = _labels.get(decision, decision)
-        original_text = query.message.text if query.message else ""
-        try:
-            await query.edit_message_text(
-                f"{original_text}\n\n→ {label}",
-                parse_mode="HTML",
-                reply_markup=None,
-            )
-        except Exception:
-            pass
-
-    # Mode alias -> SDK permission_mode value
-    _MODE_MAP: Dict[str, str] = {
-        "ask": "default",
-        "auto": "acceptEdits",
-        "yolo": "bypassPermissions",
-        "plan": "plan",
-    }
-
-    # Display info per alias
-    _MODE_INFO: Dict[str, Dict[str, str]] = {
-        "ask": {
-            "label": "Ask",
-            "emoji": "\U0001f512",
-            "desc": "Claude will ask permission before each action.",
-        },
-        "auto": {
-            "label": "Auto",
-            "emoji": "\u2705",
-            "desc": "Claude will auto-approve file edits, ask for others.",
-        },
-        "yolo": {
-            "label": "YOLO",
-            "emoji": "\U0001f525",
-            "desc": "Claude will auto-approve everything.",
-        },
-        "plan": {
-            "label": "Plan",
-            "emoji": "\U0001f4cb",
-            "desc": "Claude will plan actions and ask for approval before executing.",
-        },
-    }
-
-    def _get_current_mode_alias(self, context: ContextTypes.DEFAULT_TYPE) -> str:
-        """Return the friendly alias for the current permission mode."""
-        pm = context.user_data.get("permission_mode")
-        if pm is None:
-            return "ask"
-        # Reverse lookup
-        for alias, sdk_val in self._MODE_MAP.items():
-            if sdk_val == pm:
-                return alias
-        return "ask"
-
-    async def mode_command(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Show or set the Claude Code permission mode."""
-        args = update.message.text.split()[1:] if update.message.text else []
-
-        if not args:
-            # Show current mode
-            alias = self._get_current_mode_alias(context)
-            info = self._MODE_INFO[alias]
-            default_tag = " (default)" if alias == "ask" else ""
-            text = (
-                f"{info['emoji']} Current mode: <b>{info['label']}</b>{default_tag}\n"
-                f"{info['desc']}\n\n"
-                "Available modes:\n"
-                "\u2022 /mode ask \u2014 Ask before each action (default)\n"
-                "\u2022 /mode auto \u2014 Auto-approve file edits\n"
-                "\u2022 /mode yolo \u2014 Auto-approve everything\n"
-                "\u2022 /mode plan \u2014 Plan only, approve before execute"
-            )
-            await update.message.reply_text(text, parse_mode="HTML")
-            return
-
-        alias = args[0].lower()
-        if alias not in self._MODE_MAP:
-            await update.message.reply_text(
-                "Unknown mode. Use: /mode ask | auto | yolo | plan"
-            )
-            return
-
-        sdk_mode = self._MODE_MAP[alias]
-        info = self._MODE_INFO[alias]
-
-        # Store SDK permission mode (None means SDK default = "default")
-        context.user_data["permission_mode"] = sdk_mode
-
-        # Sync plan_mode flag for compatibility with /plan and Approve/Reject buttons
-        context.user_data["plan_mode"] = alias == "plan"
-
-        default_tag = " (default)" if alias == "ask" else ""
-        await update.message.reply_text(
-            f"{info['emoji']} Mode set to <b>{info['label']}</b>{default_tag}\n"
-            f"{info['desc']}",
-            parse_mode="HTML",
-        )

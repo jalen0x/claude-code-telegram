@@ -75,7 +75,7 @@ def deps():
 
 
 def test_classic_registers_7_commands(settings, deps):
-    """Classic mode registers 7 commands."""
+    """Classic mode registers 6 commands."""
     orchestrator = MessageOrchestrator(settings, deps)
     app = MagicMock()
     app.add_handler = MagicMock()
@@ -90,15 +90,15 @@ def test_classic_registers_7_commands(settings, deps):
         if isinstance(call[0][0], CommandHandler)
     ]
 
-    assert len(cmd_handlers) == 7
+    assert len(cmd_handlers) == 6
 
 
 async def test_classic_bot_commands(settings, deps):
-    """Classic mode returns 7 bot commands."""
+    """Classic mode returns 6 bot commands."""
     orchestrator = MessageOrchestrator(settings, deps)
     commands = await orchestrator.get_bot_commands()
 
-    assert len(commands) == 7
+    assert len(commands) == 6
     cmd_names = [c.command for c in commands]
     assert "start" in cmd_names
     assert "git" in cmd_names
