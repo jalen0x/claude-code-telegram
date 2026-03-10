@@ -378,11 +378,18 @@ class MessageOrchestrator:
         from .handlers.message import _format_progress_update
         from .utils.formatting import ResponseFormatter
 
+        progress_lines: list[str] = []
+
         async def _stream(upd: Any) -> None:  # type: ignore[override]
             try:
-                progress_text = await _format_progress_update(upd)
-                if progress_text:
-                    await progress_msg.edit_text(progress_text, parse_mode="HTML")
+                new_line = await _format_progress_update(upd)
+                if new_line:
+                    progress_lines.append(new_line)
+                    combined = "\n".join(progress_lines)
+                    while len(combined) > 3000 and len(progress_lines) > 1:
+                        progress_lines.pop(0)
+                        combined = "\n".join(progress_lines)
+                    await progress_msg.edit_text(combined, parse_mode="HTML")
             except Exception:
                 pass
 

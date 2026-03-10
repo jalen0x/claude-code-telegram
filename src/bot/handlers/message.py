@@ -55,22 +55,33 @@ async def _format_progress_update(update_obj) -> Optional[str]:
         return f"❌ <b>Error</b>\n\n<i>{error_msg}</i>"
 
     elif update_obj.type == "assistant" and update_obj.tool_calls:
-        # Show when tools are being called — extract names directly from the list.
-        tool_names = [
-            tc.get("name", "?") for tc in update_obj.tool_calls if tc.get("name")
-        ]
-        if tool_names:
-            tools_text = ", ".join(tool_names)
-            return f"🔧 <b>Using:</b> {tools_text}"
+        # Show each tool call with relevant detail (file path, command, etc.).
+        lines = []
+        for tc in update_obj.tool_calls:
+            name = tc.get("name", "?")
+            inp = tc.get("input") or {}
+            if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+                path = inp.get("file_path") or inp.get("path", "")
+                detail = f" <code>{escape_html(path)}</code>" if path else ""
+            elif name == "Bash":
+                cmd = str(inp.get("command", ""))[:80]
+                detail = f" <code>{escape_html(cmd)}</code>" if cmd else ""
+            elif name in ("Read", "Grep", "Glob"):
+                path = inp.get("file_path") or inp.get("path") or inp.get("pattern", "")
+                detail = f" <code>{escape_html(str(path))}</code>" if path else ""
+            else:
+                detail = ""
+            lines.append(f"🔧 <b>{name}</b>{detail}")
+        return "\n".join(lines) if lines else None
 
     elif update_obj.type == "assistant" and update_obj.content:
         # Show a brief preview of what Claude is saying/thinking.
         content_preview = (
-            update_obj.content[:150] + "…"
-            if len(update_obj.content) > 150
+            update_obj.content[:120] + "…"
+            if len(update_obj.content) > 120
             else update_obj.content
         )
-        return f"🤖 <b>Claude:</b> <i>{content_preview}</i>"
+        return f"💬 <i>{escape_html(content_preview)}</i>"
 
     elif update_obj.type == "system":
         # System initialization or other system messages
@@ -344,8 +355,13 @@ async def handle_text_message(
         # MCP image collection via stream intercept
         mcp_images: list[ImageAttachment] = []
 
+        # Accumulate progress lines so users see the full tool-call history
+        # instead of a single line that keeps getting replaced.
+        progress_lines: list[str] = []
+        MAX_PROGRESS_CHARS = 3000  # stay well under Telegram's 4096-char limit
+
         # Enhanced stream updates handler with progress tracking
-        async def stream_handler(update_obj):
+        async def stream_handler(update_obj):  # type: ignore[no-untyped-def]
             # Intercept send_image_to_user MCP tool calls.
             # The SDK namespaces MCP tools as "mcp__<server>__<tool>".
             if update_obj.tool_calls:
@@ -364,9 +380,17 @@ async def handle_text_message(
                             mcp_images.append(img)
 
             try:
-                progress_text = await _format_progress_update(update_obj)
-                if progress_text:
-                    await progress_msg.edit_text(progress_text, parse_mode="HTML")
+                new_line = await _format_progress_update(update_obj)
+                if new_line:
+                    progress_lines.append(new_line)
+                    # Trim from the top if we're getting too long.
+                    combined = "\n".join(progress_lines)
+                    while (
+                        len(combined) > MAX_PROGRESS_CHARS and len(progress_lines) > 1
+                    ):
+                        progress_lines.pop(0)
+                        combined = "\n".join(progress_lines)
+                    await progress_msg.edit_text(combined, parse_mode="HTML")
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
