@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional
 
 import structlog
-from telegram import InputMediaPhoto, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.ext import ContextTypes
 
 from ...claude.exceptions import (
@@ -32,59 +32,45 @@ logger = structlog.get_logger()
 async def _format_progress_update(update_obj) -> Optional[str]:
     """Format progress updates with enhanced context and visual indicators."""
     if update_obj.type == "tool_result":
-        # Show tool completion status
-        tool_name = "Unknown"
-        if update_obj.metadata and update_obj.metadata.get("tool_use_id"):
-            # Try to extract tool name from context if available
-            tool_name = update_obj.metadata.get("tool_name", "Tool")
-
-        if update_obj.is_error():
-            return f"❌ <b>{tool_name} failed</b>\n\n<i>{update_obj.get_error_message()}</i>"
-        else:
-            execution_time = ""
-            if update_obj.metadata and update_obj.metadata.get("execution_time_ms"):
-                time_ms = update_obj.metadata["execution_time_ms"]
-                execution_time = f" ({time_ms}ms)"
-            return f"✅ <b>{tool_name} completed</b>{execution_time}"
+        # Show tool completion status.
+        tool_name = (update_obj.metadata or {}).get("tool_name", "Tool")
+        error_msg = (update_obj.metadata or {}).get("error")
+        if error_msg:
+            return f"❌ <b>{tool_name} failed</b>\n\n<i>{error_msg}</i>"
+        execution_time = ""
+        time_ms = (update_obj.metadata or {}).get("execution_time_ms")
+        if time_ms:
+            execution_time = f" ({time_ms}ms)"
+        return f"✅ <b>{tool_name} done</b>{execution_time}"
 
     elif update_obj.type == "progress":
-        # Handle progress updates
-        progress_text = f"🔄 <b>{update_obj.content or 'Working...'}</b>"
-
-        percentage = update_obj.get_progress_percentage()
-        if percentage is not None:
-            # Create a simple progress bar
-            filled = int(percentage / 10)  # 0-10 scale
-            bar = "█" * filled + "░" * (10 - filled)
-            progress_text += f"\n\n<code>{bar}</code> {percentage}%"
-
-        if update_obj.progress:
-            step = update_obj.progress.get("step")
-            total_steps = update_obj.progress.get("total_steps")
-            if step and total_steps:
-                progress_text += f"\n\nStep {step} of {total_steps}"
-
-        return progress_text
+        return f"🔄 <b>{update_obj.content or 'Working…'}</b>"
 
     elif update_obj.type == "error":
-        # Handle error messages
-        return f"❌ <b>Error</b>\n\n<i>{update_obj.get_error_message()}</i>"
+        error_msg = (
+            (update_obj.metadata or {}).get("error")
+            or update_obj.content
+            or "Unknown error"
+        )
+        return f"❌ <b>Error</b>\n\n<i>{error_msg}</i>"
 
     elif update_obj.type == "assistant" and update_obj.tool_calls:
-        # Show when tools are being called
-        tool_names = update_obj.get_tool_names()
+        # Show when tools are being called — extract names directly from the list.
+        tool_names = [
+            tc.get("name", "?") for tc in update_obj.tool_calls if tc.get("name")
+        ]
         if tool_names:
             tools_text = ", ".join(tool_names)
-            return f"🔧 <b>Using tools:</b> {tools_text}"
+            return f"🔧 <b>Using:</b> {tools_text}"
 
     elif update_obj.type == "assistant" and update_obj.content:
-        # Regular content updates with preview
+        # Show a brief preview of what Claude is saying/thinking.
         content_preview = (
-            update_obj.content[:150] + "..."
+            update_obj.content[:150] + "…"
             if len(update_obj.content) > 150
             else update_obj.content
         )
-        return f"🤖 <b>Claude is working...</b>\n\n<i>{content_preview}</i>"
+        return f"🤖 <b>Claude:</b> <i>{content_preview}</i>"
 
     elif update_obj.type == "system":
         # System initialization or other system messages
@@ -384,6 +370,9 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
+        # Consume one-shot plan mode flag set by /plan command.
+        is_plan_mode = context.user_data.pop("_plan_mode", False)
+
         # Run Claude command
         try:
             claude_response = await claude_integration.run_command(
@@ -393,7 +382,13 @@ async def handle_text_message(
                 session_id=session_id,
                 on_stream=stream_handler,
                 force_new=force_new,
+                plan_mode=is_plan_mode,
             )
+
+            # In plan mode: store the original prompt so the Execute callback
+            # can re-run it with interactive approval.
+            if is_plan_mode:
+                context.user_data["_pending_plan_prompt"] = message_text
 
             # New session created successfully — clear the one-shot flag
             if force_new:
@@ -490,10 +485,29 @@ async def handle_text_message(
                             "Failed to send photo+caption", error=str(album_err)
                         )
 
+        # Build Execute/Cancel keyboard for plan mode — attached to the last message.
+        plan_keyboard: Optional[InlineKeyboardMarkup] = None
+        if is_plan_mode and claude_response and not claude_response.is_error:
+            plan_keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("▶ Execute", callback_data="plan_exec:go"),
+                        InlineKeyboardButton(
+                            "✖ Cancel", callback_data="plan_exec:cancel"
+                        ),
+                    ]
+                ]
+            )
+
         if not caption_sent:
             # Send formatted responses (may be multiple messages)
             for i, message in enumerate(formatted_messages):
-                markup = message.reply_markup
+                is_last = i == len(formatted_messages) - 1
+                markup = (
+                    plan_keyboard
+                    if (is_last and plan_keyboard)
+                    else message.reply_markup
+                )
                 try:
                     await update.message.reply_text(
                         message.text,
@@ -703,7 +717,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
                 # Update progress message with file type info
                 await progress_msg.edit_text(
-                    f"📄 Processing {processed_file.type} file: <code>{document.file_name}</code>...",
+                    f"📄 Processing {processed_file.type} file: <code>{document.file_name}</code>...",  # noqa: E501
                     parse_mode="HTML",
                 )
 
@@ -733,7 +747,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
                 # Create prompt with file content
                 caption = update.message.caption or "Please review this file:"
-                prompt = f"{caption}\n\n**File:** `{document.file_name}`\n\n```\n{content}\n```"
+                prompt = f"{caption}\n\n**File:** `{document.file_name}`\n\n```\n{content}\n```"  # noqa: E501
 
             except UnicodeDecodeError:
                 await progress_msg.edit_text(

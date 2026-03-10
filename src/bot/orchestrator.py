@@ -20,6 +20,7 @@ from telegram.ext import (
 )
 
 from ..config.settings import Settings
+from ..claude.tool_approval import ToolApprovalManager
 
 logger = structlog.get_logger()
 
@@ -245,6 +246,196 @@ class MessageOrchestrator:
         if update.effective_message:
             await update.effective_message.reply_text(message, parse_mode="HTML")
 
+    # ------------------------------------------------------------------
+    # Plan mode handlers
+    # ------------------------------------------------------------------
+
+    async def _plan_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/plan — arm plan mode for the next message."""
+        assert context.user_data is not None  # always set in handlers
+        context.user_data["_plan_mode"] = True
+        await update.message.reply_text(  # type: ignore[union-attr]
+            "📋 <b>Plan mode armed.</b>\n\n"
+            "Send your request and Claude will show you its plan first.\n"
+            "You can then choose to <b>Execute</b> or <b>Cancel</b>.",
+            parse_mode="HTML",
+        )
+
+    async def _permission_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle perm:{request_id}:{decision} inline button presses."""
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+
+        parts = (query.data or "").split(":")
+        if len(parts) != 3:
+            return
+        _, request_id, decision = parts
+
+        assert context.user_data is not None
+        approval_manager: Optional[ToolApprovalManager] = context.user_data.get(
+            "_approval_manager"
+        )
+        if not approval_manager:
+            try:
+                await query.edit_message_text(
+                    "⚠️ No active approval session.", parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            return
+
+        resolved = approval_manager.resolve(request_id, decision)
+        if not resolved:
+            try:
+                await query.edit_message_text(
+                    "⚠️ This approval request has already expired.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            return
+
+        # Update the approval message to reflect the user's decision.
+        labels = {
+            "allow": "✅ Allowed",
+            "deny": "❌ Denied",
+            "allow_all": "✅ Allowed All (session)",
+        }
+        label = labels.get(decision, decision)
+        msg = query.message
+        original = (msg.text or "") if msg and hasattr(msg, "text") else ""
+        # Strip the timeout line and buttons; append decision stamp.
+        clean = original.rsplit("\n\n⏱", 1)[0]
+        try:
+            await query.edit_message_text(
+                f"{clean}\n\n{label}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    async def _plan_execute_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle plan_exec:go and plan_exec:cancel inline button presses."""
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
+
+        assert context.user_data is not None
+        action = (query.data or "").split(":")[1]  # "go" | "cancel"
+
+        if action == "cancel":
+            context.user_data.pop("_pending_plan_prompt", None)
+            msg = query.message
+            original = (msg.text or "") if msg and hasattr(msg, "text") else ""
+            try:
+                await query.edit_message_text(
+                    f"{original}\n\n✖ <i>Plan cancelled.</i>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            return
+
+        # ── Execute path ──────────────────────────────────────────────
+        prompt: Optional[str] = context.user_data.pop("_pending_plan_prompt", None)
+        if not prompt:
+            msg = query.message
+            if msg and hasattr(msg, "reply_text"):
+                await msg.reply_text(  # type: ignore[union-attr]
+                    "⚠️ Plan prompt not found. Please send your request again."
+                )
+            return
+
+        # Remove Execute/Cancel buttons from the plan message.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        chat = update.effective_chat
+        if not chat:
+            return
+
+        claude_integration = context.bot_data.get("claude_integration")
+        settings: Settings = context.bot_data["settings"]
+        user_id = update.effective_user.id  # type: ignore[union-attr]
+        current_dir = context.user_data.get(
+            "current_directory", settings.approved_directory
+        )
+        session_id: Optional[str] = context.user_data.get("claude_session_id")
+
+        # Create a fresh ToolApprovalManager for this execution.
+        approval_manager = ToolApprovalManager(
+            bot=context.bot,
+            chat_id=chat.id,
+            timeout=120.0,
+        )
+        context.user_data["_approval_manager"] = approval_manager
+
+        progress_msg = await chat.send_message("⚙️ Executing plan…")
+
+        from .handlers.message import _format_progress_update
+        from .utils.formatting import ResponseFormatter
+
+        async def _stream(upd: Any) -> None:  # type: ignore[override]
+            try:
+                progress_text = await _format_progress_update(upd)
+                if progress_text:
+                    await progress_msg.edit_text(progress_text, parse_mode="HTML")
+            except Exception:
+                pass
+
+        try:
+            response = await claude_integration.run_command(  # type: ignore[union-attr]
+                prompt=prompt,
+                working_directory=current_dir,
+                user_id=user_id,
+                session_id=session_id,
+                on_stream=_stream,
+                approval_manager=approval_manager,
+            )
+            context.user_data["claude_session_id"] = response.session_id
+
+            formatter = ResponseFormatter(settings)
+            formatted_messages = formatter.format_claude_response(response.content)
+
+        except Exception as exc:
+            logger.error("Plan execute failed", error=str(exc), user_id=user_id)
+            from .utils.formatting import FormattedMessage
+
+            formatted_messages = [
+                FormattedMessage(
+                    f"❌ <b>Execution failed</b>\n\n<code>{exc!s:.400}</code>",
+                    parse_mode="HTML",
+                )
+            ]
+        finally:
+            context.user_data.pop("_approval_manager", None)
+
+        await progress_msg.delete()
+
+        for fmsg in formatted_messages:
+            try:
+                await chat.send_message(
+                    fmsg.text,
+                    parse_mode=fmsg.parse_mode,
+                    reply_markup=fmsg.reply_markup,
+                )
+            except Exception as send_err:
+                logger.warning("Failed to send execute response", error=str(send_err))
+                await chat.send_message(fmsg.text)
+
+    # ------------------------------------------------------------------
+
     def register_handlers(self, app: Application) -> None:
         """Register classic handler set."""
         self._register_classic_handlers(app)
@@ -266,6 +457,26 @@ class MessageOrchestrator:
 
         for cmd, handler in handlers:
             app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
+
+        # /plan command
+        app.add_handler(CommandHandler("plan", self._inject_deps(self._plan_command)))
+
+        # Permission and plan-execute callbacks must be registered BEFORE the
+        # catch-all CallbackQueryHandler so their patterns are matched first.
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._permission_callback),
+                pattern=r"^perm:",
+            ),
+            group=0,
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._plan_execute_callback),
+                pattern=r"^plan_exec:",
+            ),
+            group=0,
+        )
 
         app.add_handler(
             MessageHandler(
@@ -299,6 +510,7 @@ class MessageOrchestrator:
         commands = [
             BotCommand("start", "Start bot and show help"),
             BotCommand("new", "Clear context and start fresh session"),
+            BotCommand("plan", "Show plan before executing (Claude Code plan mode)"),
             BotCommand("projects", "Show all projects"),
             BotCommand("status", "Show session status"),
             BotCommand("git", "Git repository commands"),

@@ -37,6 +37,7 @@ from .exceptions import (
     ClaudeTimeoutError,
 )
 from .monitor import _is_claude_internal_path, check_bash_directory_boundary
+from .tool_approval import WRITE_TOOLS, ToolApprovalManager
 
 logger = structlog.get_logger()
 
@@ -69,6 +70,7 @@ def _make_can_use_tool_callback(
     security_validator: SecurityValidator,
     working_directory: Path,
     approved_directory: Path,
+    approval_manager: Optional["ToolApprovalManager"] = None,
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
@@ -121,6 +123,13 @@ def _make_can_use_tool_callback(
                         message=error or "Bash directory boundary violation"
                     )
 
+        # Interactive approval for write tools (plan-execute mode only).
+        if approval_manager is not None and tool_name in WRITE_TOOLS:
+            decision = await approval_manager.request_approval(tool_name, tool_input)
+            if decision == "allow":
+                return PermissionResultAllow()
+            return PermissionResultDeny(message="User denied this action")
+
         return PermissionResultAllow()
 
     return can_use_tool
@@ -138,6 +147,11 @@ class ClaudeSDKManager:
         self.config = config
         self.security_validator = security_validator
 
+        # Unset CLAUDECODE env var so spawned Claude Code subprocesses don't
+        # reject themselves as nested sessions.  This bot intentionally launches
+        # child Claude Code processes and is not a nested session.
+        os.environ.pop("CLAUDECODE", None)
+
         # Set up environment for Claude Code SDK if API key is provided
         # If no API key is provided, the SDK will use existing CLI authentication
         if config.anthropic_api_key_str:
@@ -153,6 +167,8 @@ class ClaudeSDKManager:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        plan_mode: bool = False,
+        approval_manager: Optional[ToolApprovalManager] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -210,7 +226,7 @@ class ClaudeSDKManager:
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
                 system_prompt=base_prompt,
-                permission_mode="bypassPermissions",
+                permission_mode="plan" if plan_mode else "bypassPermissions",
                 setting_sources=["project"],
                 stderr=_stderr_callback,
             )
@@ -223,12 +239,14 @@ class ClaudeSDKManager:
                     mcp_config_path=str(self.config.mcp_config_path),
                 )
 
-            # Wire can_use_tool callback for preventive tool validation
+            # Wire can_use_tool callback for preventive tool validation.
+            # Also carries approval_manager for interactive plan-execute mode.
             if self.security_validator:
                 options.can_use_tool = _make_can_use_tool_callback(
                     security_validator=self.security_validator,
                     working_directory=working_directory,
                     approved_directory=self.config.approved_directory,
+                    approval_manager=approval_manager,
                 )
 
             # Resume previous session if we have a session_id
