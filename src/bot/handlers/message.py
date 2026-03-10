@@ -390,8 +390,13 @@ async def handle_text_message(
             "plan" if context.user_data.get("plan_mode") else None
         )
 
-        # Create interactive approval manager for ask/plan modes
+        # Create interactive approval manager for ask mode.
+        # When approval_manager is set, we do NOT pass permission_mode to CLI
+        # because can_use_tool (with permission_prompt_tool_name="stdio") handles
+        # all permission decisions. Passing --permission-mode would make CLI
+        # handle permissions internally instead of delegating to our callback.
         approval_manager = None
+        effective_permission_mode = permission_mode
         if permission_mode in (None, "default", "plan"):
             approval_manager = ToolApprovalManager(
                 bot=context.bot,
@@ -408,7 +413,10 @@ async def handle_text_message(
                 session_id=session_id,
                 on_stream=stream_handler,
                 force_new=force_new,
-                permission_mode=permission_mode,
+                # When approval_manager handles permissions, don't pass
+                # permission_mode to CLI — it would bypass our can_use_tool callback.
+                # Only pass explicit modes like acceptEdits/bypassPermissions.
+                permission_mode=None if approval_manager else permission_mode,
                 approval_manager=approval_manager,
             )
 
@@ -449,6 +457,7 @@ async def handle_text_message(
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             from ..utils.formatting import FormattedMessage
 
+            claude_response = None
             formatted_messages = [
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")
             ]
