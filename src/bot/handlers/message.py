@@ -426,8 +426,27 @@ async def handle_text_message(
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")
             ]
 
-        # Delete progress message
-        await progress_msg.delete()
+        # If tool calls were shown, keep the progress bubble as context and
+        # add a short transition line so the reply feels connected.
+        # If nothing was shown (no tool calls, no assistant text), just delete
+        # the stub "Processing…" placeholder.
+        if progress_lines:
+            try:
+                combined = "\n".join(progress_lines)
+                await progress_msg.edit_text(
+                    combined + "\n\n💬 <i>Responding…</i>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
+        else:
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: list[ImageAttachment] = mcp_images
