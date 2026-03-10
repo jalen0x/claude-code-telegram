@@ -40,14 +40,9 @@ async def security_middleware(
         # Continue without validation (log error but don't block)
         return await handler(event, data)
 
-    # In agentic mode, user text is a prompt to Claude — not a command.
-    # Skip input validation so natural conversation (backticks, paths, etc.) works.
-    settings = data.get("settings")
-    agentic_mode = getattr(settings, "agentic_mode", False) if settings else False
-
-    # Validate text content if present (classic mode only)
+    # Validate text content if present
     message = event.effective_message
-    if message and message.text and not agentic_mode:
+    if message and message.text:
         is_safe, violation_type = await validate_message_content(
             message.text, security_validator, user_id, audit_logger
         )

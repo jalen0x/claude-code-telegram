@@ -54,21 +54,20 @@ class FeatureRegistry:
             except Exception as e:
                 logger.error("Failed to initialize git integration", error=str(e))
 
-        # Quick actions - skip in agentic mode
-        if self.config.enable_quick_actions and not self.config.agentic_mode:
+        # Quick actions
+        if self.config.enable_quick_actions:
             try:
                 self.features["quick_actions"] = QuickActionManager()
                 logger.info("Quick actions feature enabled")
             except Exception as e:
                 logger.error("Failed to initialize quick actions", error=str(e))
 
-        # Session export - classic mode only
-        if not self.config.agentic_mode:
-            try:
-                self.features["session_export"] = SessionExporter(storage=self.storage)
-                logger.info("Session export feature enabled")
-            except Exception as e:
-                logger.error("Failed to initialize session export", error=str(e))
+        # Session export
+        try:
+            self.features["session_export"] = SessionExporter(storage=self.storage)
+            logger.info("Session export feature enabled")
+        except Exception as e:
+            logger.error("Failed to initialize session export", error=str(e))
 
         # Image handling - always enabled
         try:

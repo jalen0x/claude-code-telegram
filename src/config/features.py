@@ -67,11 +67,6 @@ class FeatureFlags:
         return self.settings.enable_scheduler
 
     @property
-    def agentic_mode_enabled(self) -> bool:
-        """Check if agentic conversational mode is enabled."""
-        return self.settings.agentic_mode
-
-    @property
     def voice_messages_enabled(self) -> bool:
         """Check if voice message transcription is enabled."""
         if not self.settings.enable_voice_messages:
@@ -98,7 +93,6 @@ class FeatureFlags:
             "development": self.development_features_enabled,
             "api_server": self.api_server_enabled,
             "scheduler": self.scheduler_enabled,
-            "agentic_mode": self.agentic_mode_enabled,
             "voice_messages": self.voice_messages_enabled,
             "stream_drafts": self.stream_drafts_enabled,
         }

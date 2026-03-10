@@ -196,10 +196,6 @@ class Settings(BaseSettings):
         le=200,
     )
     enable_quick_actions: bool = Field(True, description="Enable quick action buttons")
-    agentic_mode: bool = Field(
-        True,
-        description="Conversational agentic mode (default) vs classic command mode",
-    )
 
     # Reply quoting
     reply_quote: bool = Field(
