@@ -6,7 +6,7 @@ request times out.
 """
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import structlog
@@ -16,7 +16,6 @@ logger = structlog.get_logger()
 
 # Tools that mutate state and therefore require user approval in "ask" mode
 _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "Bash", "Task", "NotebookEdit"}
-
 
 
 def _escape_html(text: str) -> str:
@@ -46,9 +45,7 @@ def _format_tool_summary(tool_name: str, tool_input: Dict[str, Any]) -> str:
             lines.append(f"Command: <code>{_escape_html(command)}</code>")
 
     elif tool_name == "Task":
-        description = str(
-            tool_input.get("description") or tool_input.get("prompt", "")
-        )
+        description = str(tool_input.get("description") or tool_input.get("prompt", ""))
         if description:
             if len(description) > 100:
                 description = description[:97] + "..."
@@ -103,9 +100,7 @@ class ToolApprovalManager:
         """Return True when the tool requires user approval."""
         return tool_name in _WRITE_TOOLS
 
-    async def request_approval(
-        self, tool_name: str, tool_input: Dict[str, Any]
-    ) -> str:
+    async def request_approval(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Request user approval for a single tool call.
 
         Blocks (asynchronously) until the user clicks a button.

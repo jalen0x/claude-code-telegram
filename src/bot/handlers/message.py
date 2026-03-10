@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional
 
 import structlog
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram import InputMediaPhoto, Update
 from telegram.ext import ContextTypes
 
 from ...claude.exceptions import (
@@ -15,6 +15,7 @@ from ...claude.exceptions import (
     ClaudeSessionError,
     ClaudeTimeoutError,
 )
+from ...claude.tool_approval import ToolApprovalManager
 from ...config.settings import Settings
 from ...security.audit import AuditLogger
 from ...security.rate_limiter import RateLimiter
@@ -389,8 +390,16 @@ async def handle_text_message(
             "plan" if context.user_data.get("plan_mode") else None
         )
 
+        # Create interactive approval manager for ask/plan modes
+        approval_manager = None
+        if permission_mode in (None, "default", "plan"):
+            approval_manager = ToolApprovalManager(
+                bot=context.bot,
+                chat_id=update.effective_chat.id,
+            )
+            context.user_data["_approval_manager"] = approval_manager
+
         # Run Claude command
-        success = True
         try:
             claude_response = await claude_integration.run_command(
                 prompt=message_text,
@@ -400,6 +409,7 @@ async def handle_text_message(
                 on_stream=stream_handler,
                 force_new=force_new,
                 permission_mode=permission_mode,
+                approval_manager=approval_manager,
             )
 
             # New session created successfully — clear the one-shot flag
@@ -436,7 +446,6 @@ async def handle_text_message(
             )
 
         except Exception as e:
-            success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             from ..utils.formatting import FormattedMessage
 
@@ -444,34 +453,13 @@ async def handle_text_message(
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")
             ]
 
+        # Clean up approval manager after execution
+        context.user_data.pop("_approval_manager", None)
+        if approval_manager:
+            await approval_manager.cleanup()
+
         # Delete progress message
         await progress_msg.delete()
-
-        # Plan mode: show approval buttons only when Claude used write/mutating tools.
-        # Read-only tools (Read, Grep, Glob, LS) don't need approval.
-        _WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "Bash", "Task", "NotebookEdit"}
-        plan_keyboard = None
-        has_write_tools = (
-            claude_response
-            and any(t.get("name") in _WRITE_TOOLS for t in claude_response.tools_used)
-            if claude_response
-            else False
-        )
-        if (
-            permission_mode == "plan"
-            and success
-            and formatted_messages
-            and has_write_tools
-        ):
-            context.user_data["pending_plan_prompt"] = message_text
-            plan_keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("Approve", callback_data="plan:approve"),
-                        InlineKeyboardButton("Reject", callback_data="plan:reject"),
-                    ]
-                ]
-            )
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: list[ImageAttachment] = mcp_images
@@ -526,9 +514,7 @@ async def handle_text_message(
         if not caption_sent:
             # Send formatted responses (may be multiple messages)
             for i, message in enumerate(formatted_messages):
-                # Attach plan approval keyboard to the last message
-                is_last = i == len(formatted_messages) - 1
-                markup = plan_keyboard if is_last else message.reply_markup
+                markup = message.reply_markup
                 try:
                     await update.message.reply_text(
                         message.text,
@@ -630,6 +616,11 @@ async def handle_text_message(
         logger.info("Text message processed successfully", user_id=user_id)
 
     except Exception as e:
+        # Clean up approval manager on unexpected error
+        mgr = context.user_data.pop("_approval_manager", None)
+        if mgr:
+            await mgr.cleanup()
+
         # Clean up progress message if it exists
         try:
             await progress_msg.delete()
