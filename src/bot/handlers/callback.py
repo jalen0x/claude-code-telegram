@@ -18,11 +18,9 @@ logger = structlog.get_logger()
 
 def _is_within_root(path: Path, root: Path) -> bool:
     """Check whether path is within root directory."""
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
+    from ...utils.path_utils import is_path_within
+
+    return is_path_within(path.resolve(), root.resolve())
 
 
 def _get_thread_project_root(

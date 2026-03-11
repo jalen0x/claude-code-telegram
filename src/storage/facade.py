@@ -3,6 +3,7 @@
 Provides simple API for the rest of the application.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any, Dict, Optional
 
@@ -109,11 +110,13 @@ class Storage:
                 )
                 await self.tools.save_tool_usage(tool_usage)
 
-        # Update cost tracking
-        await self.costs.update_daily_cost(user_id, response.cost)
+        # Fetch user and session in parallel, update cost concurrently
+        user_task = self.users.get_user(user_id)
+        session_task = self.sessions.get_session(session_id)
+        cost_task = self.costs.update_daily_cost(user_id, response.cost)
+        user, session, _ = await asyncio.gather(user_task, session_task, cost_task)
 
         # Update user stats
-        user = await self.users.get_user(user_id)
         if user:
             user.total_cost += response.cost
             user.message_count += 1
@@ -121,7 +124,6 @@ class Storage:
             await self.users.update_user(user)
 
         # Update session stats
-        session = await self.sessions.get_session(session_id)
         if session:
             session.total_cost += response.cost
             session.total_turns += response.num_turns
@@ -255,8 +257,10 @@ class Storage:
         if not session:
             return None
 
-        messages = await self.messages.get_session_messages(session_id, limit)
-        tools = await self.tools.get_session_tool_usage(session_id)
+        messages, tools = await asyncio.gather(
+            self.messages.get_session_messages(session_id, limit),
+            self.tools.get_session_tool_usage(session_id),
+        )
 
         return {
             "session": session.to_dict(),
@@ -282,20 +286,14 @@ class Storage:
         if not user:
             return None
 
-        # Get user stats
-        stats = await self.analytics.get_user_stats(user_id)
-
-        # Get recent sessions
-        sessions = await self.sessions.get_user_sessions(user_id, active_only=True)
-
-        # Get recent messages
-        messages = await self.messages.get_user_messages(user_id, limit=10)
-
-        # Get recent audit log
-        audit_logs = await self.audit.get_user_audit_log(user_id, limit=20)
-
-        # Get daily costs
-        daily_costs = await self.costs.get_user_daily_costs(user_id, days=30)
+        # Fetch all independent data in parallel
+        stats, sessions, messages, audit_logs, daily_costs = await asyncio.gather(
+            self.analytics.get_user_stats(user_id),
+            self.sessions.get_user_sessions(user_id, active_only=True),
+            self.messages.get_user_messages(user_id, limit=10),
+            self.audit.get_user_audit_log(user_id, limit=20),
+            self.costs.get_user_daily_costs(user_id, days=30),
+        )
 
         return {
             "user": user.to_dict(),
@@ -308,20 +306,16 @@ class Storage:
 
     async def get_admin_dashboard(self) -> Dict[str, Any]:
         """Get admin dashboard data."""
-        # Get system stats
-        system_stats = await self.analytics.get_system_stats()
-
-        # Get all users
-        users = await self.users.get_all_users()
-
-        # Get recent audit log
-        recent_audit = await self.audit.get_recent_audit_log(hours=24)
-
-        # Get total costs
-        total_costs = await self.costs.get_total_costs(days=30)
-
-        # Get tool stats
-        tool_stats = await self.tools.get_tool_stats()
+        # Fetch all independent data in parallel
+        system_stats, users, recent_audit, total_costs, tool_stats = (
+            await asyncio.gather(
+                self.analytics.get_system_stats(),
+                self.users.get_all_users(),
+                self.audit.get_recent_audit_log(hours=24),
+                self.costs.get_total_costs(days=30),
+                self.tools.get_tool_stats(),
+            )
+        )
 
         return {
             "system_stats": system_stats,

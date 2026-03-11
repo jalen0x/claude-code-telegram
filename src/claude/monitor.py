@@ -165,8 +165,6 @@ def _is_claude_internal_path(file_path: str) -> bool:
 
 def _is_within_directory(path: Path, directory: Path) -> bool:
     """Check if path is within directory."""
-    try:
-        path.relative_to(directory)
-        return True
-    except ValueError:
-        return False
+    from ..utils.path_utils import is_path_within
+
+    return is_path_within(path, directory)
