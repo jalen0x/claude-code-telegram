@@ -367,11 +367,21 @@ class MessageOrchestrator:
                 )
             return
 
-        # Remove Execute/Cancel buttons from the plan message.
+        # Acknowledge the click: remove buttons and append an executing indicator
+        # so the user gets immediate visual feedback before the progress bubble appears.
+        plan_msg = query.message
+        original_text = (plan_msg.text or "") if plan_msg else ""
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_text(
+                original_text + "\n\n⚡ <i>Executing…</i>",
+                parse_mode="HTML",
+            )
         except Exception:
-            pass
+            # Fallback: silently remove buttons only.
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
 
         chat = update.effective_chat
         if not chat:
