@@ -31,7 +31,7 @@ def _extract_tool_detail(name: str, inp: dict) -> str:  # type: ignore[type-arg]
     return ""
 
 
-async def _format_progress_update(
+def _format_progress_update(
     update_obj: object, verbose_level: int = 1
 ) -> Optional[str]:
     """Format progress updates with enhanced context and visual indicators.
@@ -126,8 +126,8 @@ class StreamingProgress:
         if self._interceptor is not None:
             try:
                 await self._interceptor(update_obj)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Stream interceptor failed", error=str(e))
 
         # 2. Tool calls
         if getattr(update_obj, "tool_calls", None):
@@ -149,7 +149,7 @@ class StreamingProgress:
 
         # 4. Fallback: edit progress_msg with formatted line.
         try:
-            new_line = await _format_progress_update(
+            new_line = _format_progress_update(
                 update_obj, verbose_level=self._verbose_level
             )
             if new_line:
@@ -216,7 +216,8 @@ class StreamingProgress:
             # Keep the progress bubble as context, add a transition line.
             try:
                 combined = "\n".join(self._progress_lines)
-                assert self._progress_msg is not None
+                if self._progress_msg is None:
+                    return
                 await self._progress_msg.edit_text(
                     combined + "\n\n💬 <i>Responding…</i>",
                     parse_mode="HTML",

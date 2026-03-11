@@ -204,9 +204,11 @@ class MessageOrchestrator:
     @staticmethod
     def _is_within(path: Path, root: Path) -> bool:
         """Return True if path is within root."""
-        from ..utils.path_utils import is_path_within
-
-        return is_path_within(path, root)
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _extract_message_thread_id(update: Update) -> Optional[int]:

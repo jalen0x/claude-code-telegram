@@ -199,7 +199,7 @@ class Settings(BaseSettings):
 
     # Reply quoting
     reply_quote: bool = Field(
-        True,
+        False,
         description=(
             "Quote the original user message when replying. "
             "Set to false for cleaner thread-based conversations."
