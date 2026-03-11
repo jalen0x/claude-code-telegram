@@ -741,8 +741,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 return
 
-        # Delete file-download progress message before entering Claude phase.
-        await progress_msg.delete()
+        # Collapse the download indicator to a compact file badge so the user
+        # retains context while Claude processes below.
+        size_kb = round(document.file_size / 1024, 1)
+        try:
+            await progress_msg.edit_text(
+                f"📄 <code>{escape_html(document.file_name)}</code> ({size_kb} KB)",
+                parse_mode="HTML",
+            )
+        except Exception:
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
 
         # Get Claude integration from context
         claude_integration = context.bot_data.get("claude_integration")
@@ -866,8 +877,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 photo, update.message.caption
             )
 
-            # Delete image-download progress message before entering Claude phase.
-            await progress_msg.delete()
+            # Collapse to a compact badge.
+            try:
+                await progress_msg.edit_text("📸 <i>Image received</i>", parse_mode="HTML")
+            except Exception:
+                try:
+                    await progress_msg.delete()
+                except Exception:
+                    pass
 
             # Get Claude integration
             claude_integration = context.bot_data.get("claude_integration")
@@ -984,8 +1001,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             voice, update.message.caption
         )
 
-        # Delete transcription progress before entering Claude phase.
-        await progress_msg.delete()
+        # Show the transcription so the user can verify what was heard,
+        # then keep it as context while Claude responds below.
+        preview = processed_voice.transcription[:200] + (
+            "…" if len(processed_voice.transcription) > 200 else ""
+        )
+        try:
+            await progress_msg.edit_text(
+                f"🎙️ <i>{escape_html(preview)}</i>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
 
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
