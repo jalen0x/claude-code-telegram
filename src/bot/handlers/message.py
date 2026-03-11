@@ -52,6 +52,22 @@ def _extract_message_thread_id(update: Update) -> Optional[int]:
     return None
 
 
+def _reply_context_kwargs(update: Update) -> dict[str, int]:
+    """Build explicit reply/thread kwargs for non-reply send APIs."""
+    kwargs: dict[str, int] = {}
+
+    thread_id = _extract_message_thread_id(update)
+    if thread_id is not None:
+        kwargs["message_thread_id"] = thread_id
+
+    message = update.effective_message
+    reply_to_message_id = getattr(message, "message_id", None) if message else None
+    if isinstance(reply_to_message_id, int) and reply_to_message_id > 0:
+        kwargs["reply_to_message_id"] = reply_to_message_id
+
+    return kwargs
+
+
 def _format_error_message(error: Exception | str) -> str:
     """Format error messages for user-friendly display.
 
@@ -417,6 +433,7 @@ async def handle_text_message(
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: list[ImageAttachment] = mcp_images
+        reply_context = _reply_context_kwargs(update)
 
         # Try to combine text + images when response fits in a caption
         caption_sent = False
@@ -453,6 +470,7 @@ async def handle_text_message(
                             try:
                                 await update.message.chat.send_media_group(
                                     media=media,
+                                    **reply_context,
                                 )
                                 caption_sent = True
                             finally:
@@ -537,6 +555,7 @@ async def handle_text_message(
                             try:
                                 await update.message.chat.send_media_group(
                                     media=media,
+                                    **reply_context,
                                 )
                             finally:
                                 for fh in file_handles:

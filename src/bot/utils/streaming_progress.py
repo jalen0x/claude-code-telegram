@@ -112,6 +112,12 @@ class StreamingProgress:
 
     # -- Public API ----------------------------------------------------------
 
+    def _thread_kwargs(self) -> dict[str, int]:
+        """Return thread-routing kwargs for topic-aware sends."""
+        if self._message_thread_id is None:
+            return {}
+        return {"message_thread_id": self._message_thread_id}
+
     def set_interceptor(self, fn: Interceptor) -> None:
         """Set an interceptor called on every stream update (e.g. MCP images)."""
         self._interceptor = fn
@@ -240,7 +246,7 @@ class StreamingProgress:
     async def _typing_heartbeat(self) -> None:
         """Send typing action immediately and refresh every 4s."""
         try:
-            await self._chat.send_action("typing")
+            await self._chat.send_action("typing", **self._thread_kwargs())
         except Exception:
             pass
         while not self._typing_stop.is_set():
@@ -251,7 +257,7 @@ class StreamingProgress:
             if self._typing_stop.is_set():
                 break
             try:
-                await self._chat.send_action("typing")
+                await self._chat.send_action("typing", **self._thread_kwargs())
             except Exception:
                 pass
 
@@ -260,7 +266,9 @@ class StreamingProgress:
         if self._progress_msg is None:
             try:
                 self._progress_msg = await self._chat.send_message(
-                    text="🔧 ...", parse_mode="HTML"
+                    text="🔧 ...",
+                    parse_mode="HTML",
+                    **self._thread_kwargs(),
                 )
             except Exception:
                 pass
