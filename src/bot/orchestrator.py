@@ -204,11 +204,9 @@ class MessageOrchestrator:
     @staticmethod
     def _is_within(path: Path, root: Path) -> bool:
         """Return True if path is within root."""
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return False
+        from ..utils.path_utils import is_path_within
+
+        return is_path_within(path, root)
 
     @staticmethod
     def _extract_message_thread_id(update: Update) -> Optional[int]:
@@ -355,35 +353,34 @@ class MessageOrchestrator:
         )
         session_id: Optional[str] = context.user_data.get("claude_session_id")
 
-        progress_msg = await chat.send_message("⚙️ Executing plan…")
-
-        from .handlers.message import _format_progress_update
         from .utils.formatting import ResponseFormatter
+        from .utils.streaming_progress import StreamingProgress
 
-        progress_lines: list[str] = []
+        message_thread_id = self._extract_message_thread_id(update)
 
-        async def _stream(upd: Any) -> None:  # type: ignore[override]
-            try:
-                new_line = await _format_progress_update(upd)
-                if new_line:
-                    progress_lines.append(new_line)
-                    combined = "\n".join(progress_lines)
-                    while len(combined) > 3000 and len(progress_lines) > 1:
-                        progress_lines.pop(0)
-                        combined = "\n".join(progress_lines)
-                    await progress_msg.edit_text(combined, parse_mode="HTML")
-            except Exception:
-                pass
+        # Resolve verbose level: per-user override > global setting
+        verbose_level: int = context.user_data.get(
+            "verbose_level", settings.verbose_level
+        )
 
         formatted_messages = []
         try:
-            response = await claude_integration.run_command(  # type: ignore[union-attr]
-                prompt=prompt,
-                working_directory=current_dir,
-                user_id=user_id,
-                session_id=session_id,
-                on_stream=_stream,
-            )
+            async with StreamingProgress(
+                chat=chat,
+                bot=context.bot,
+                chat_id=chat.id,
+                message_thread_id=message_thread_id,
+                verbose_level=verbose_level,
+                enable_drafts=settings.enable_stream_drafts,
+                draft_interval=settings.stream_draft_interval,
+            ) as sp:
+                response = await claude_integration.run_command(  # type: ignore[union-attr]
+                    prompt=prompt,
+                    working_directory=current_dir,
+                    user_id=user_id,
+                    session_id=session_id,
+                    on_stream=sp.stream_callback,
+                )
             context.user_data["claude_session_id"] = response.session_id
 
             formatter = ResponseFormatter(settings)
@@ -399,7 +396,6 @@ class MessageOrchestrator:
                     parse_mode="HTML",
                 )
             ]
-        await progress_msg.delete()
 
         for fmsg in formatted_messages:
             try:

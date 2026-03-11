@@ -25,23 +25,9 @@ from ..utils.image_extractor import (
     should_send_as_photo,
     validate_image_path,
 )
+from ..utils.streaming_progress import StreamingProgress
 
 logger = structlog.get_logger()
-
-
-def _extract_tool_detail(name: str, inp: dict) -> str:  # type: ignore[type-arg]
-    """Extract a human-readable detail snippet from a tool call's input.
-
-    Returns the raw string (file path, command, etc.) — callers decide
-    whether to HTML-escape or use as plain text.
-    """
-    if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
-        return str(inp.get("file_path") or inp.get("path", ""))
-    if name == "Bash":
-        return str(inp.get("command", ""))[:80]
-    if name in ("Read", "Grep", "Glob"):
-        return str(inp.get("file_path") or inp.get("path") or inp.get("pattern", ""))
-    return ""
 
 
 def _extract_message_thread_id(update: Update) -> Optional[int]:
@@ -63,46 +49,6 @@ def _extract_message_thread_id(update: Update) -> Optional[int]:
     chat = update.effective_chat
     if chat and getattr(chat, "is_forum", False):
         return 1
-    return None
-
-
-async def _format_progress_update(
-    update_obj: object, verbose_level: int = 1
-) -> Optional[str]:
-    """Format progress updates with enhanced context and visual indicators.
-
-    verbose_level controls output:
-      0 — suppress all progress (return None always)
-      1 — tool name only, no input details
-      2 — tool name + file path / command snippet (full detail)
-    """
-    if verbose_level == 0:
-        return None
-
-    if update_obj.type == "assistant" and update_obj.tool_calls:
-        lines = []
-        for tc in update_obj.tool_calls:
-            name = tc.get("name", "?")
-            if verbose_level >= 2:
-                detail_raw = _extract_tool_detail(name, tc.get("input") or {})
-                detail = (
-                    f" <code>{escape_html(detail_raw)}</code>" if detail_raw else ""
-                )
-            else:
-                detail = ""
-            lines.append(f"🔧 <b>{name}</b>{detail}")
-        return "\n".join(lines) if lines else None
-
-    elif update_obj.type == "assistant" and update_obj.content:
-        if verbose_level < 2:
-            return None
-        content_preview = (
-            update_obj.content[:120] + "…"
-            if len(update_obj.content) > 120
-            else update_obj.content
-        )
-        return f"💬 <i>{escape_html(content_preview)}</i>"
-
     return None
 
 
@@ -331,42 +277,11 @@ async def handle_text_message(
                 await update.message.reply_text(f"⏱️ {limit_message}")
                 return
 
-        # Typing heartbeat: send "typing" immediately then refresh every 4s
-        # so long operations don't look frozen.
-        typing_stop = asyncio.Event()
-
-        async def _typing_heartbeat() -> None:
-            try:
-                await update.message.chat.send_action("typing")
-            except Exception:
-                pass
-            while not typing_stop.is_set():
-                try:
-                    await asyncio.wait_for(typing_stop.wait(), timeout=4.0)
-                except asyncio.TimeoutError:
-                    pass
-                if typing_stop.is_set():
-                    break
-                try:
-                    await update.message.chat.send_action("typing")
-                except Exception:
-                    pass
-
-        typing_task = asyncio.create_task(_typing_heartbeat())
-
-        # Create progress message
-        progress_msg = await update.message.reply_text(
-            "🤔 Processing your request...",
-            reply_to_message_id=update.message.message_id,
-        )
-
         # Get Claude integration and storage from context
         claude_integration = context.bot_data.get("claude_integration")
         storage = context.bot_data.get("storage")
 
         if not claude_integration:
-            typing_stop.set()
-            typing_task.cancel()
             await update.message.reply_text(
                 "❌ <b>Claude integration not available</b>\n\n"
                 "The Claude Code integration is not properly configured. "
@@ -395,33 +310,11 @@ async def handle_text_message(
         # MCP image collection via stream intercept
         mcp_images: list[ImageAttachment] = []
 
-        # DraftStreamer setup (gated behind enable_stream_drafts)
-        draft_streamer = None
-        if settings.enable_stream_drafts:
-            from ..utils.draft_streamer import DraftStreamer, generate_draft_id
-
-            message_thread_id = _extract_message_thread_id(update)
-            draft_streamer = DraftStreamer(
-                bot=context.bot,
-                chat_id=update.message.chat_id,
-                draft_id=generate_draft_id(),
-                message_thread_id=message_thread_id,
-                throttle_interval=settings.stream_draft_interval,
-            )
-
-        # Accumulate progress lines so users see the full tool-call history
-        # instead of a single line that keeps getting replaced.
-        progress_lines: list[str] = []
-        MAX_PROGRESS_CHARS = 3000  # stay well under Telegram's 4096-char limit
-
-        # Enhanced stream updates handler with progress tracking
-        async def stream_handler(update_obj):  # type: ignore[no-untyped-def]
-            # Single pass over tool_calls: intercept MCP images + feed
-            # DraftStreamer (when enabled) in one loop.
-            if update_obj.tool_calls:
-                for tc in update_obj.tool_calls:
+        async def mcp_image_interceptor(update_obj: object) -> None:
+            """Intercept send_image_to_user MCP tool calls."""
+            if getattr(update_obj, "tool_calls", None):
+                for tc in update_obj.tool_calls:  # type: ignore[attr-defined]
                     tc_name = tc.get("name", "")
-                    # Intercept send_image_to_user MCP tool calls.
                     if tc_name == "send_image_to_user" or tc_name.endswith(
                         "__send_image_to_user"
                     ):
@@ -433,150 +326,94 @@ async def handle_text_message(
                         )
                         if img:
                             mcp_images.append(img)
-                    # Stream tool call to DraftStreamer (when enabled).
-                    if draft_streamer is not None and verbose_level >= 1:
-                        detail_raw = (
-                            _extract_tool_detail(tc_name, tc.get("input") or {})
-                            if verbose_level >= 2
-                            else ""
-                        )
-                        detail = f" {detail_raw}" if detail_raw else ""
-                        await draft_streamer.append_tool(f"🔧 {tc_name}{detail}")
 
-            # DraftStreamer: stream text deltas, then skip progress_msg editing.
-            if draft_streamer is not None:
-                if not update_obj.tool_calls:
-                    update_type = getattr(update_obj, "type", None)
-                    if update_type == "content_block_delta" or (
-                        update_type == "assistant" and update_obj.content
-                    ):
-                        text = getattr(update_obj, "content", "")
-                        if text:
-                            await draft_streamer.append_text(text)
-                return  # skip progress_msg editing when using drafts
-
-            try:
-                new_line = await _format_progress_update(
-                    update_obj, verbose_level=verbose_level
-                )
-                if new_line:
-                    progress_lines.append(new_line)
-                    # Trim from the top if we're getting too long.
-                    combined = "\n".join(progress_lines)
-                    while (
-                        len(combined) > MAX_PROGRESS_CHARS and len(progress_lines) > 1
-                    ):
-                        progress_lines.pop(0)
-                        combined = "\n".join(progress_lines)
-                    await progress_msg.edit_text(combined, parse_mode="HTML")
-            except Exception as e:
-                logger.warning("Failed to update progress message", error=str(e))
+        message_thread_id = _extract_message_thread_id(update)
 
         # Consume one-shot plan mode flag set by /plan command.
         is_plan_mode = context.user_data.pop("_plan_mode", False)
 
-        # Run Claude command
-        try:
-            claude_response = await claude_integration.run_command(
-                prompt=message_text,
-                working_directory=current_dir,
-                user_id=user_id,
-                session_id=session_id,
-                on_stream=stream_handler,
-                force_new=force_new,
-                plan_mode=is_plan_mode,
-            )
+        async with StreamingProgress(
+            chat=update.message.chat,
+            bot=context.bot,
+            chat_id=update.message.chat_id,
+            message_thread_id=message_thread_id,
+            verbose_level=verbose_level,
+            enable_drafts=settings.enable_stream_drafts,
+            draft_interval=settings.stream_draft_interval,
+        ) as sp:
+            sp.set_interceptor(mcp_image_interceptor)
 
-            # In plan mode: store the original prompt so the Execute callback
-            # can re-run it with interactive approval.
-            if is_plan_mode:
-                context.user_data["_pending_plan_prompt"] = message_text
-
-            # New session created successfully — clear the one-shot flag
-            if force_new:
-                context.user_data["force_new_session"] = False
-
-            # Update session ID
-            context.user_data["claude_session_id"] = claude_response.session_id
-
-            # Log interaction to storage
-            if storage:
-                try:
-                    await storage.save_claude_interaction(
-                        user_id=user_id,
-                        session_id=claude_response.session_id,
-                        prompt=message_text,
-                        response=claude_response,
-                        ip_address=None,  # Telegram doesn't provide IP
-                    )
-                except Exception as e:
-                    logger.warning("Failed to log interaction to storage", error=str(e))
-
-            # Build response context for smart quick actions
-            content = claude_response.content or ""
-            tools_used = getattr(claude_response, "tools_used", []) or []
-            content_lower = content.lower()
-            response_context = {
-                "has_code": "```" in content
-                or any(t in tools_used for t in ("Write", "Edit", "Bash", "MultiEdit")),
-                "has_errors": any(
-                    kw in content_lower
-                    for kw in ("error", "traceback", "exception", "failed")
-                ),
-                "is_short": len(content) < 200 and "```" not in content,
-            }
-
-            # Format response
-            from ..utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content, context=response_context
-            )
-
-        except Exception as e:
-            logger.error("Claude integration failed", error=str(e), user_id=user_id)
-            from ..utils.formatting import FormattedMessage
-
-            claude_response = None
-            formatted_messages = [
-                FormattedMessage(_format_error_message(e), parse_mode="HTML")
-            ]
-        finally:
-            # Stop typing heartbeat
-            typing_stop.set()
-            typing_task.cancel()
-
-        # Flush DraftStreamer and clean up progress message
-        if draft_streamer is not None:
+            # Run Claude command
             try:
-                await draft_streamer.flush()
-            except Exception:
-                pass
-            try:
-                await progress_msg.delete()
-            except Exception:
-                pass
-        elif progress_lines:
-            # If tool calls were shown, keep the progress bubble as context and
-            # add a short transition line so the reply feels connected.
-            try:
-                combined = "\n".join(progress_lines)
-                await progress_msg.edit_text(
-                    combined + "\n\n💬 <i>Responding…</i>",
-                    parse_mode="HTML",
+                claude_response = await claude_integration.run_command(
+                    prompt=message_text,
+                    working_directory=current_dir,
+                    user_id=user_id,
+                    session_id=session_id,
+                    on_stream=sp.stream_callback,
+                    force_new=force_new,
+                    plan_mode=is_plan_mode,
                 )
-            except Exception:
-                try:
-                    await progress_msg.delete()
-                except Exception:
-                    pass
-        else:
-            # Nothing was shown — delete the stub "Processing…" placeholder.
-            try:
-                await progress_msg.delete()
-            except Exception:
-                pass
+
+                # In plan mode: store the original prompt so the Execute callback
+                # can re-run it with interactive approval.
+                if is_plan_mode:
+                    context.user_data["_pending_plan_prompt"] = message_text
+
+                # New session created successfully — clear the one-shot flag
+                if force_new:
+                    context.user_data["force_new_session"] = False
+
+                # Update session ID
+                context.user_data["claude_session_id"] = claude_response.session_id
+
+                # Log interaction to storage
+                if storage:
+                    try:
+                        await storage.save_claude_interaction(
+                            user_id=user_id,
+                            session_id=claude_response.session_id,
+                            prompt=message_text,
+                            response=claude_response,
+                            ip_address=None,  # Telegram doesn't provide IP
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to log interaction to storage", error=str(e)
+                        )
+
+                # Build response context for smart quick actions
+                content = claude_response.content or ""
+                tools_used = getattr(claude_response, "tools_used", []) or []
+                content_lower = content.lower()
+                response_context = {
+                    "has_code": "```" in content
+                    or any(
+                        t in tools_used for t in ("Write", "Edit", "Bash", "MultiEdit")
+                    ),
+                    "has_errors": any(
+                        kw in content_lower
+                        for kw in ("error", "traceback", "exception", "failed")
+                    ),
+                    "is_short": len(content) < 200 and "```" not in content,
+                }
+
+                # Format response
+                from ..utils.formatting import ResponseFormatter
+
+                formatter = ResponseFormatter(settings)
+                formatted_messages = formatter.format_claude_response(
+                    claude_response.content, context=response_context
+                )
+
+            except Exception as e:
+                logger.error("Claude integration failed", error=str(e), user_id=user_id)
+                from ..utils.formatting import FormattedMessage
+
+                claude_response = None
+                formatted_messages = [
+                    FormattedMessage(_format_error_message(e), parse_mode="HTML")
+                ]
 
         # Use MCP-collected images (from send_image_to_user tool calls)
         images: list[ImageAttachment] = mcp_images
@@ -596,7 +433,6 @@ async def handle_text_message(
                                     photo=f,
                                     caption=msg.text,
                                     parse_mode=msg.parse_mode,
-                                    reply_to_message_id=update.message.message_id,
                                 )
                             caption_sent = True
                         else:
@@ -617,7 +453,6 @@ async def handle_text_message(
                             try:
                                 await update.message.chat.send_media_group(
                                     media=media,
-                                    reply_to_message_id=update.message.message_id,
                                 )
                                 caption_sent = True
                             finally:
@@ -656,9 +491,6 @@ async def handle_text_message(
                         message.text,
                         parse_mode=message.parse_mode,
                         reply_markup=markup,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
                     )
                     if i < len(formatted_messages) - 1:
                         await asyncio.sleep(0.5)
@@ -672,9 +504,6 @@ async def handle_text_message(
                         await update.message.reply_text(
                             message.text,
                             reply_markup=message.reply_markup,
-                            reply_to_message_id=(
-                                update.message.message_id if i == 0 else None
-                            ),
                         )
                     except Exception as plain_err:
                         logger.error(
@@ -685,9 +514,6 @@ async def handle_text_message(
                             f"Failed to deliver response "
                             f"(Telegram error: {str(plain_err)[:150]}). "
                             f"Please try again.",
-                            reply_to_message_id=(
-                                update.message.message_id if i == 0 else None
-                            ),
                         )
 
             # Send images separately
@@ -700,7 +526,6 @@ async def handle_text_message(
                             with open(photos[0].path, "rb") as f:
                                 await update.message.reply_photo(
                                     photo=f,
-                                    reply_to_message_id=update.message.message_id,
                                 )
                         else:
                             media = []
@@ -712,7 +537,6 @@ async def handle_text_message(
                             try:
                                 await update.message.chat.send_media_group(
                                     media=media,
-                                    reply_to_message_id=update.message.message_id,
                                 )
                             finally:
                                 for fh in file_handles:
@@ -727,7 +551,6 @@ async def handle_text_message(
                             await update.message.reply_document(
                                 document=f,
                                 filename=img.path.name,
-                                reply_to_message_id=update.message.message_id,
                             )
                         await asyncio.sleep(0.5)
                     except Exception as doc_err:
@@ -752,17 +575,6 @@ async def handle_text_message(
         logger.info("Text message processed successfully", user_id=user_id)
 
     except Exception as e:
-        # Stop typing heartbeat (may not have been stopped if error occurred
-        # before the inner try/finally block).
-        typing_stop.set()
-        typing_task.cancel()
-
-        # Clean up progress message if it exists
-        try:
-            await progress_msg.delete()
-        except Exception as delete_error:
-            logger.debug("Failed to delete progress message", error=str(delete_error))
-
         await update.message.reply_text(_format_error_message(e), parse_mode="HTML")
 
         # Log failed processing
@@ -910,19 +722,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 return
 
-        # Delete progress message
+        # Delete file-download progress message before entering Claude phase.
         await progress_msg.delete()
-
-        # Create a new progress message for Claude processing
-        claude_progress_msg = await update.message.reply_text(
-            "🤖 Processing file with Claude...", parse_mode="HTML"
-        )
 
         # Get Claude integration from context
         claude_integration = context.bot_data.get("claude_integration")
 
         if not claude_integration:
-            await claude_progress_msg.edit_text(
+            await update.message.reply_text(
                 "❌ <b>Claude integration not available</b>\n\n"
                 "The Claude Code integration is not properly configured.",
                 parse_mode="HTML",
@@ -934,15 +741,29 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "current_directory", settings.approved_directory
         )
         session_id = context.user_data.get("claude_session_id")
+        verbose_level: int = context.user_data.get(
+            "verbose_level", settings.verbose_level
+        )
+        message_thread_id = _extract_message_thread_id(update)
 
-        # Process with Claude
+        # Process with Claude using unified streaming
         try:
-            claude_response = await claude_integration.run_command(
-                prompt=prompt,
-                working_directory=current_dir,
-                user_id=user_id,
-                session_id=session_id,
-            )
+            async with StreamingProgress(
+                chat=update.message.chat,
+                bot=context.bot,
+                chat_id=update.message.chat_id,
+                message_thread_id=message_thread_id,
+                verbose_level=verbose_level,
+                enable_drafts=settings.enable_stream_drafts,
+                draft_interval=settings.stream_draft_interval,
+            ) as sp:
+                claude_response = await claude_integration.run_command(
+                    prompt=prompt,
+                    working_directory=current_dir,
+                    user_id=user_id,
+                    session_id=session_id,
+                    on_stream=sp.stream_callback,
+                )
 
             # Update session ID
             context.user_data["claude_session_id"] = claude_response.session_id
@@ -955,25 +776,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 claude_response.content
             )
 
-            # Delete progress message
-            await claude_progress_msg.delete()
-
             # Send responses
             for i, message in enumerate(formatted_messages):
                 await update.message.reply_text(
                     message.text,
                     parse_mode=message.parse_mode,
                     reply_markup=message.reply_markup,
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
                 )
 
                 if i < len(formatted_messages) - 1:
                     await asyncio.sleep(0.5)
 
         except Exception as e:
-            await claude_progress_msg.edit_text(
-                _format_error_message(e), parse_mode="HTML"
-            )
+            await update.message.reply_text(_format_error_message(e), parse_mode="HTML")
             logger.error("Claude file processing failed", error=str(e), user_id=user_id)
 
         # Log successful file processing
@@ -1032,19 +847,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 photo, update.message.caption
             )
 
-            # Delete progress message
+            # Delete image-download progress message before entering Claude phase.
             await progress_msg.delete()
-
-            # Create Claude progress message
-            claude_progress_msg = await update.message.reply_text(
-                "🤖 Analyzing image with Claude...", parse_mode="HTML"
-            )
 
             # Get Claude integration
             claude_integration = context.bot_data.get("claude_integration")
 
             if not claude_integration:
-                await claude_progress_msg.edit_text(
+                await update.message.reply_text(
                     "❌ <b>Claude integration not available</b>\n\n"
                     "The Claude Code integration is not properly configured.",
                     parse_mode="HTML",
@@ -1056,15 +866,29 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "current_directory", settings.approved_directory
             )
             session_id = context.user_data.get("claude_session_id")
+            verbose_level: int = context.user_data.get(
+                "verbose_level", settings.verbose_level
+            )
+            message_thread_id = _extract_message_thread_id(update)
 
-            # Process with Claude
+            # Process with Claude using unified streaming
             try:
-                claude_response = await claude_integration.run_command(
-                    prompt=processed_image.prompt,
-                    working_directory=current_dir,
-                    user_id=user_id,
-                    session_id=session_id,
-                )
+                async with StreamingProgress(
+                    chat=update.message.chat,
+                    bot=context.bot,
+                    chat_id=update.message.chat_id,
+                    message_thread_id=message_thread_id,
+                    verbose_level=verbose_level,
+                    enable_drafts=settings.enable_stream_drafts,
+                    draft_interval=settings.stream_draft_interval,
+                ) as sp:
+                    claude_response = await claude_integration.run_command(
+                        prompt=processed_image.prompt,
+                        working_directory=current_dir,
+                        user_id=user_id,
+                        session_id=session_id,
+                        on_stream=sp.stream_callback,
+                    )
 
                 # Update session ID
                 context.user_data["claude_session_id"] = claude_response.session_id
@@ -1077,25 +901,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     claude_response.content
                 )
 
-                # Delete progress message
-                await claude_progress_msg.delete()
-
                 # Send responses
                 for i, message in enumerate(formatted_messages):
                     await update.message.reply_text(
                         message.text,
                         parse_mode=message.parse_mode,
                         reply_markup=message.reply_markup,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
                     )
 
                     if i < len(formatted_messages) - 1:
                         await asyncio.sleep(0.5)
 
             except Exception as e:
-                await claude_progress_msg.edit_text(
+                await update.message.reply_text(
                     _format_error_message(e), parse_mode="HTML"
                 )
                 logger.error(
@@ -1147,13 +965,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             voice, update.message.caption
         )
 
-        await progress_msg.edit_text(
-            "🤖 Processing transcription with Claude...", parse_mode="HTML"
-        )
+        # Delete transcription progress before entering Claude phase.
+        await progress_msg.delete()
 
         claude_integration = context.bot_data.get("claude_integration")
         if not claude_integration:
-            await progress_msg.edit_text(
+            await update.message.reply_text(
                 "❌ <b>Claude integration not available</b>\n\n"
                 "The Claude Code integration is not properly configured.",
                 parse_mode="HTML",
@@ -1164,16 +981,28 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "current_directory", settings.approved_directory
         )
         session_id = context.user_data.get("claude_session_id")
+        verbose_level: int = context.user_data.get(
+            "verbose_level", settings.verbose_level
+        )
+        message_thread_id = _extract_message_thread_id(update)
 
         try:
-            # Keep classic mode aligned with handle_photo: single progress message,
-            # no streaming callback or typing heartbeat.
-            claude_response = await claude_integration.run_command(
-                prompt=processed_voice.prompt,
-                working_directory=current_dir,
-                user_id=user_id,
-                session_id=session_id,
-            )
+            async with StreamingProgress(
+                chat=update.message.chat,
+                bot=context.bot,
+                chat_id=update.message.chat_id,
+                message_thread_id=message_thread_id,
+                verbose_level=verbose_level,
+                enable_drafts=settings.enable_stream_drafts,
+                draft_interval=settings.stream_draft_interval,
+            ) as sp:
+                claude_response = await claude_integration.run_command(
+                    prompt=processed_voice.prompt,
+                    working_directory=current_dir,
+                    user_id=user_id,
+                    session_id=session_id,
+                    on_stream=sp.stream_callback,
+                )
 
             context.user_data["claude_session_id"] = claude_response.session_id
 
@@ -1184,20 +1013,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 claude_response.content
             )
 
-            await progress_msg.delete()
-
             for i, message in enumerate(formatted_messages):
                 await update.message.reply_text(
                     message.text,
                     parse_mode=message.parse_mode,
                     reply_markup=message.reply_markup,
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
                 )
                 if i < len(formatted_messages) - 1:
                     await asyncio.sleep(0.5)
 
         except Exception as e:
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
+            await update.message.reply_text(_format_error_message(e), parse_mode="HTML")
             logger.error(
                 "Claude voice processing failed", error=str(e), user_id=user_id
             )
