@@ -409,8 +409,20 @@ class ResponseFormatter:
     def _get_contextual_keyboard(
         self, context: Optional[dict]
     ) -> Optional[InlineKeyboardMarkup]:
-        """Get context-aware quick action keyboard."""
+        """Get context-aware quick action keyboard.
+
+        Suppresses buttons entirely for short, simple responses (no code,
+        no errors) so trivial answers like "2+2 = 4" stay clean.
+        """
         if not context:
+            return None
+
+        # Short simple answer — no buttons needed
+        if (
+            context.get("is_short")
+            and not context.get("has_code")
+            and not context.get("has_errors")
+        ):
             return None
 
         buttons = []

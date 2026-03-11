@@ -29,30 +29,73 @@ from ..utils.image_extractor import (
 logger = structlog.get_logger()
 
 
-async def _format_progress_update(update_obj) -> Optional[str]:
-    """Format progress updates with enhanced context and visual indicators."""
+def _extract_tool_detail(name: str, inp: dict) -> str:  # type: ignore[type-arg]
+    """Extract a human-readable detail snippet from a tool call's input.
+
+    Returns the raw string (file path, command, etc.) — callers decide
+    whether to HTML-escape or use as plain text.
+    """
+    if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        return str(inp.get("file_path") or inp.get("path", ""))
+    if name == "Bash":
+        return str(inp.get("command", ""))[:80]
+    if name in ("Read", "Grep", "Glob"):
+        return str(inp.get("file_path") or inp.get("path") or inp.get("pattern", ""))
+    return ""
+
+
+def _extract_message_thread_id(update: Update) -> Optional[int]:
+    """Extract topic/thread id from update message.
+
+    Mirrors ``MessageOrchestrator._extract_message_thread_id`` — duplicated
+    here to avoid a circular import (orchestrator imports from this module).
+    """
+    message = update.effective_message
+    if not message:
+        return None
+    thread_id = getattr(message, "message_thread_id", None)
+    if isinstance(thread_id, int) and thread_id > 0:
+        return thread_id
+    dm_topic = getattr(message, "direct_messages_topic", None)
+    topic_id = getattr(dm_topic, "topic_id", None) if dm_topic else None
+    if isinstance(topic_id, int) and topic_id > 0:
+        return topic_id
+    chat = update.effective_chat
+    if chat and getattr(chat, "is_forum", False):
+        return 1
+    return None
+
+
+async def _format_progress_update(
+    update_obj: object, verbose_level: int = 1
+) -> Optional[str]:
+    """Format progress updates with enhanced context and visual indicators.
+
+    verbose_level controls output:
+      0 — suppress all progress (return None always)
+      1 — tool name only, no input details
+      2 — tool name + file path / command snippet (full detail)
+    """
+    if verbose_level == 0:
+        return None
+
     if update_obj.type == "assistant" and update_obj.tool_calls:
-        # Show each tool call with relevant detail (file path, command, etc.).
         lines = []
         for tc in update_obj.tool_calls:
             name = tc.get("name", "?")
-            inp = tc.get("input") or {}
-            if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
-                path = inp.get("file_path") or inp.get("path", "")
-                detail = f" <code>{escape_html(path)}</code>" if path else ""
-            elif name == "Bash":
-                cmd = str(inp.get("command", ""))[:80]
-                detail = f" <code>{escape_html(cmd)}</code>" if cmd else ""
-            elif name in ("Read", "Grep", "Glob"):
-                path = inp.get("file_path") or inp.get("path") or inp.get("pattern", "")
-                detail = f" <code>{escape_html(str(path))}</code>" if path else ""
+            if verbose_level >= 2:
+                detail_raw = _extract_tool_detail(name, tc.get("input") or {})
+                detail = (
+                    f" <code>{escape_html(detail_raw)}</code>" if detail_raw else ""
+                )
             else:
                 detail = ""
             lines.append(f"🔧 <b>{name}</b>{detail}")
         return "\n".join(lines) if lines else None
 
     elif update_obj.type == "assistant" and update_obj.content:
-        # Show a brief preview of what Claude is saying/thinking.
+        if verbose_level < 2:
+            return None
         content_preview = (
             update_obj.content[:120] + "…"
             if len(update_obj.content) > 120
@@ -288,8 +331,28 @@ async def handle_text_message(
                 await update.message.reply_text(f"⏱️ {limit_message}")
                 return
 
-        # Send typing indicator
-        await update.message.chat.send_action("typing")
+        # Typing heartbeat: send "typing" immediately then refresh every 4s
+        # so long operations don't look frozen.
+        typing_stop = asyncio.Event()
+
+        async def _typing_heartbeat() -> None:
+            try:
+                await update.message.chat.send_action("typing")
+            except Exception:
+                pass
+            while not typing_stop.is_set():
+                try:
+                    await asyncio.wait_for(typing_stop.wait(), timeout=4.0)
+                except asyncio.TimeoutError:
+                    pass
+                if typing_stop.is_set():
+                    break
+                try:
+                    await update.message.chat.send_action("typing")
+                except Exception:
+                    pass
+
+        typing_task = asyncio.create_task(_typing_heartbeat())
 
         # Create progress message
         progress_msg = await update.message.reply_text(
@@ -302,6 +365,8 @@ async def handle_text_message(
         storage = context.bot_data.get("storage")
 
         if not claude_integration:
+            typing_stop.set()
+            typing_task.cancel()
             await update.message.reply_text(
                 "❌ <b>Claude integration not available</b>\n\n"
                 "The Claude Code integration is not properly configured. "
@@ -322,8 +387,27 @@ async def handle_text_message(
         # Flag is only cleared after a successful run so retries keep the intent.
         force_new = bool(context.user_data.get("force_new_session"))
 
+        # Resolve verbose level: per-user override > global setting
+        verbose_level: int = context.user_data.get(
+            "verbose_level", settings.verbose_level
+        )
+
         # MCP image collection via stream intercept
         mcp_images: list[ImageAttachment] = []
+
+        # DraftStreamer setup (gated behind enable_stream_drafts)
+        draft_streamer = None
+        if settings.enable_stream_drafts:
+            from ..utils.draft_streamer import DraftStreamer, generate_draft_id
+
+            message_thread_id = _extract_message_thread_id(update)
+            draft_streamer = DraftStreamer(
+                bot=context.bot,
+                chat_id=update.message.chat_id,
+                draft_id=generate_draft_id(),
+                message_thread_id=message_thread_id,
+                throttle_interval=settings.stream_draft_interval,
+            )
 
         # Accumulate progress lines so users see the full tool-call history
         # instead of a single line that keeps getting replaced.
@@ -332,11 +416,12 @@ async def handle_text_message(
 
         # Enhanced stream updates handler with progress tracking
         async def stream_handler(update_obj):  # type: ignore[no-untyped-def]
-            # Intercept send_image_to_user MCP tool calls.
-            # The SDK namespaces MCP tools as "mcp__<server>__<tool>".
+            # Single pass over tool_calls: intercept MCP images + feed
+            # DraftStreamer (when enabled) in one loop.
             if update_obj.tool_calls:
                 for tc in update_obj.tool_calls:
                     tc_name = tc.get("name", "")
+                    # Intercept send_image_to_user MCP tool calls.
                     if tc_name == "send_image_to_user" or tc_name.endswith(
                         "__send_image_to_user"
                     ):
@@ -348,9 +433,32 @@ async def handle_text_message(
                         )
                         if img:
                             mcp_images.append(img)
+                    # Stream tool call to DraftStreamer (when enabled).
+                    if draft_streamer is not None and verbose_level >= 1:
+                        detail_raw = (
+                            _extract_tool_detail(tc_name, tc.get("input") or {})
+                            if verbose_level >= 2
+                            else ""
+                        )
+                        detail = f" {detail_raw}" if detail_raw else ""
+                        await draft_streamer.append_tool(f"🔧 {tc_name}{detail}")
+
+            # DraftStreamer: stream text deltas, then skip progress_msg editing.
+            if draft_streamer is not None:
+                if not update_obj.tool_calls:
+                    update_type = getattr(update_obj, "type", None)
+                    if update_type == "content_block_delta" or (
+                        update_type == "assistant" and update_obj.content
+                    ):
+                        text = getattr(update_obj, "content", "")
+                        if text:
+                            await draft_streamer.append_text(text)
+                return  # skip progress_msg editing when using drafts
 
             try:
-                new_line = await _format_progress_update(update_obj)
+                new_line = await _format_progress_update(
+                    update_obj, verbose_level=verbose_level
+                )
                 if new_line:
                     progress_lines.append(new_line)
                     # Trim from the top if we're getting too long.
@@ -404,12 +512,26 @@ async def handle_text_message(
                 except Exception as e:
                     logger.warning("Failed to log interaction to storage", error=str(e))
 
+            # Build response context for smart quick actions
+            content = claude_response.content or ""
+            tools_used = getattr(claude_response, "tools_used", []) or []
+            content_lower = content.lower()
+            response_context = {
+                "has_code": "```" in content
+                or any(t in tools_used for t in ("Write", "Edit", "Bash", "MultiEdit")),
+                "has_errors": any(
+                    kw in content_lower
+                    for kw in ("error", "traceback", "exception", "failed")
+                ),
+                "is_short": len(content) < 200 and "```" not in content,
+            }
+
             # Format response
             from ..utils.formatting import ResponseFormatter
 
             formatter = ResponseFormatter(settings)
             formatted_messages = formatter.format_claude_response(
-                claude_response.content
+                claude_response.content, context=response_context
             )
 
         except Exception as e:
@@ -420,12 +542,24 @@ async def handle_text_message(
             formatted_messages = [
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")
             ]
+        finally:
+            # Stop typing heartbeat
+            typing_stop.set()
+            typing_task.cancel()
 
-        # If tool calls were shown, keep the progress bubble as context and
-        # add a short transition line so the reply feels connected.
-        # If nothing was shown (no tool calls, no assistant text), just delete
-        # the stub "Processing…" placeholder.
-        if progress_lines:
+        # Flush DraftStreamer and clean up progress message
+        if draft_streamer is not None:
+            try:
+                await draft_streamer.flush()
+            except Exception:
+                pass
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
+        elif progress_lines:
+            # If tool calls were shown, keep the progress bubble as context and
+            # add a short transition line so the reply feels connected.
             try:
                 combined = "\n".join(progress_lines)
                 await progress_msg.edit_text(
@@ -438,6 +572,7 @@ async def handle_text_message(
                 except Exception:
                     pass
         else:
+            # Nothing was shown — delete the stub "Processing…" placeholder.
             try:
                 await progress_msg.delete()
             except Exception:
@@ -617,6 +752,11 @@ async def handle_text_message(
         logger.info("Text message processed successfully", user_id=user_id)
 
     except Exception as e:
+        # Stop typing heartbeat (may not have been stopped if error occurred
+        # before the inner try/finally block).
+        typing_stop.set()
+        typing_task.cancel()
+
         # Clean up progress message if it exists
         try:
             await progress_msg.delete()
@@ -1089,5 +1229,3 @@ def _estimate_file_processing_cost(file_size: int) -> float:
     size_cost = (file_size / 1024) * 0.0001
 
     return base_cost + size_cost
-
-

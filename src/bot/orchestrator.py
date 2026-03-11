@@ -246,6 +246,46 @@ class MessageOrchestrator:
             await update.effective_message.reply_text(message, parse_mode="HTML")
 
     # ------------------------------------------------------------------
+    # Verbose command
+    # ------------------------------------------------------------------
+
+    async def _verbose_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/verbose [0|1|2] — get or set output verbosity level."""
+        assert context.user_data is not None
+        args = context.args or []  # type: ignore[attr-defined]
+        if args:
+            try:
+                level = int(args[0])
+                if level not in (0, 1, 2):
+                    raise ValueError
+            except (ValueError, IndexError):
+                await update.message.reply_text(  # type: ignore[union-attr]
+                    "Usage: <code>/verbose 0|1|2</code>\n\n"
+                    "0 = quiet (final response only)\n"
+                    "1 = normal (tool names)\n"
+                    "2 = detailed (tool names + inputs)",
+                    parse_mode="HTML",
+                )
+                return
+            context.user_data["verbose_level"] = level
+            labels = {0: "quiet", 1: "normal", 2: "detailed"}
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"Verbose level set to <b>{level}</b> ({labels[level]}).",
+                parse_mode="HTML",
+            )
+        else:
+            current = context.user_data.get(
+                "verbose_level", self.settings.verbose_level
+            )
+            await update.message.reply_text(  # type: ignore[union-attr]
+                f"Current verbose level: <b>{current}</b>\n\n"
+                "Usage: <code>/verbose 0|1|2</code>",
+                parse_mode="HTML",
+            )
+
+    # ------------------------------------------------------------------
     # Plan mode handlers
     # ------------------------------------------------------------------
 
@@ -396,8 +436,11 @@ class MessageOrchestrator:
         for cmd, handler in handlers:
             app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
 
-        # /plan command
+        # /plan and /verbose commands
         app.add_handler(CommandHandler("plan", self._inject_deps(self._plan_command)))
+        app.add_handler(
+            CommandHandler("verbose", self._inject_deps(self._verbose_command))
+        )
 
         # plan-execute callback must be registered BEFORE the
         # catch-all CallbackQueryHandler so its pattern is matched first.
@@ -443,6 +486,7 @@ class MessageOrchestrator:
             BotCommand("new", "Clear context and start fresh session"),
             BotCommand("plan", "Show plan before executing (Claude Code plan mode)"),
             BotCommand("projects", "Show all projects"),
+            BotCommand("verbose", "Set output verbosity (0/1/2)"),
             BotCommand("status", "Show session status"),
             BotCommand("git", "Git repository commands"),
             BotCommand("restart", "Restart the bot"),
