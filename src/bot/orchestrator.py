@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import structlog
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -249,6 +249,16 @@ class MessageOrchestrator:
     # Verbose command
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _verbose_keyboard(current: int) -> InlineKeyboardMarkup:
+        """Build inline keyboard for verbose level selection."""
+        labels = {0: "Quiet", 1: "Normal", 2: "Detailed"}
+        buttons = []
+        for level, label in labels.items():
+            text = f"• {label}" if level == current else label
+            buttons.append(InlineKeyboardButton(text, callback_data=f"verbose:{level}"))
+        return InlineKeyboardMarkup([buttons])
+
     async def _verbose_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -261,12 +271,13 @@ class MessageOrchestrator:
                 if level not in (0, 1, 2):
                     raise ValueError
             except (ValueError, IndexError):
+                current = context.user_data.get(
+                    "verbose_level", self.settings.verbose_level
+                )
                 await update.message.reply_text(  # type: ignore[union-attr]
-                    "Usage: <code>/verbose 0|1|2</code>\n\n"
-                    "0 = quiet (final response only)\n"
-                    "1 = normal (tool names)\n"
-                    "2 = detailed (tool names + inputs)",
+                    "Choose verbose level:",
                     parse_mode="HTML",
+                    reply_markup=self._verbose_keyboard(current),
                 )
                 return
             context.user_data["verbose_level"] = level
@@ -280,10 +291,29 @@ class MessageOrchestrator:
                 "verbose_level", self.settings.verbose_level
             )
             await update.message.reply_text(  # type: ignore[union-attr]
-                f"Current verbose level: <b>{current}</b>\n\n"
-                "Usage: <code>/verbose 0|1|2</code>",
+                "Choose verbose level:",
                 parse_mode="HTML",
+                reply_markup=self._verbose_keyboard(current),
             )
+
+    async def _verbose_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle verbose level inline button presses."""
+        query = update.callback_query
+        assert query is not None
+        await query.answer()
+        assert context.user_data is not None
+
+        level = int(query.data.split(":")[1])  # type: ignore[union-attr]
+        context.user_data["verbose_level"] = level
+        labels = {0: "quiet", 1: "normal", 2: "detailed"}
+
+        await query.edit_message_text(
+            f"Verbose level set to <b>{level}</b> ({labels[level]}).",
+            parse_mode="HTML",
+            reply_markup=self._verbose_keyboard(level),
+        )
 
     # ------------------------------------------------------------------
     # Plan mode handlers
@@ -440,12 +470,19 @@ class MessageOrchestrator:
             CommandHandler("verbose", self._inject_deps(self._verbose_command))
         )
 
-        # plan-execute callback must be registered BEFORE the
-        # catch-all CallbackQueryHandler so its pattern is matched first.
+        # plan-execute and verbose callbacks must be registered BEFORE the
+        # catch-all CallbackQueryHandler so their patterns are matched first.
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._plan_execute_callback),
                 pattern=r"^plan_exec:",
+            ),
+            group=0,
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                self._inject_deps(self._verbose_callback),
+                pattern=r"^verbose:",
             ),
             group=0,
         )
